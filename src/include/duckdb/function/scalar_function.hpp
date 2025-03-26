@@ -161,7 +161,11 @@ public:
 	function_deserialize_t deserialize;
 	//! Additional function info, passed to the bind
 	shared_ptr<ScalarFunctionInfo> function_info;
+	bool is_udf = false;
 
+	DUCKDB_API bool IsUDF() const {
+		return is_udf;
+	}
 	DUCKDB_API bool operator==(const ScalarFunction &rhs) const;
 	DUCKDB_API bool operator!=(const ScalarFunction &rhs) const;
 

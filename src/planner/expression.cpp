@@ -16,6 +16,19 @@ Expression::Expression(ExpressionType type, ExpressionClass expression_class, Lo
 Expression::~Expression() {
 }
 
+bool Expression::ContainsUDF() const {
+	bool contains_udf = false;
+	unique_ptr<Expression> expr_wrapper(const_cast<Expression *>(this));
+	ExpressionIterator::EnumerateExpression(expr_wrapper, [&](Expression &child) {
+		if (child.GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
+			auto &bound_func = child.Cast<BoundFunctionExpression>();
+			contains_udf |= bound_func.function.IsUDF();
+		}
+	});
+	expr_wrapper.release();
+	return contains_udf;
+}
+
 bool Expression::IsAggregate() const {
 	bool is_aggregate = false;
 	ExpressionIterator::EnumerateChildren(*this, [&](const Expression &child) { is_aggregate |= child.IsAggregate(); });

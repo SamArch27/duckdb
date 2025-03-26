@@ -1,5 +1,5 @@
 #include "duckdb/optimizer/optimizer.hpp"
-
+#include <iostream>
 #include "duckdb/execution/column_binding_resolver.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -130,6 +130,9 @@ void Optimizer::RunBuiltInOptimizers() {
 		plan = filter_pullup.Rewrite(std::move(plan));
 	});
 
+	std::cout << "BEFORE FILTER PUSHDOWN" << std::endl;
+	std::cout << plan->ToString() << std::endl;
+
 	// perform filter pushdown
 	RunOptimizer(OptimizerType::FILTER_PUSHDOWN, [&]() {
 		FilterPushdown filter_pushdown(*this);
@@ -137,6 +140,9 @@ void Optimizer::RunBuiltInOptimizers() {
 		filter_pushdown.CheckMarkToSemi(*plan, top_bindings);
 		plan = filter_pushdown.Rewrite(std::move(plan));
 	});
+
+	std::cout << "AFTER FILTER PUSHDOWN" << std::endl;
+	std::cout << plan->ToString() << std::endl;
 
 	// derive and push filters into materialized CTEs
 	RunOptimizer(OptimizerType::CTE_FILTER_PUSHER, [&]() {
@@ -166,12 +172,18 @@ void Optimizer::RunBuiltInOptimizers() {
 		plan = empty_result_pullup.Optimize(std::move(plan));
 	});
 
+	std::cout << "BEFORE JOIN ORDERING" << std::endl;
+	std::cout << plan->ToString() << std::endl;
+
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
 	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 		JoinOrderOptimizer optimizer(context);
 		plan = optimizer.Optimize(std::move(plan));
 	});
+
+	std::cout << "AFTER JOIN ORDERING" << std::endl;
+	std::cout << plan->ToString() << std::endl;
 
 	// rewrites UNNESTs in DelimJoins by moving them to the projection
 	RunOptimizer(OptimizerType::UNNEST_REWRITER, [&]() {

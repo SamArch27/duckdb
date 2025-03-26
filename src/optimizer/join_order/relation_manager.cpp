@@ -194,10 +194,18 @@ bool RelationManager::ExtractJoinRelations(JoinOrderOptimizer &optimizer, Logica
 	// pass through single child operators
 	while (op->children.size() == 1 && !OperatorNeedsRelation(op->type)) {
 		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+			auto &filter = op->Cast<LogicalFilter>();
+			auto &exprs = filter.expressions;
+			bool contains_udf = std::any_of(exprs.begin(), exprs.end(),
+			                                [](unique_ptr<Expression> &expr) { return expr->ContainsUDF(); });
+
 			if (HasNonReorderableChild(*op)) {
 				datasource_filters.push_back(*op);
 			}
-			filter_operators.push_back(*op);
+
+			if (!contains_udf) {
+				filter_operators.push_back(*op);
+			}
 		}
 		if (op->type == LogicalOperatorType::LOGICAL_LIMIT) {
 			limit_op = op;

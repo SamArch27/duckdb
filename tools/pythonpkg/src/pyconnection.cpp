@@ -392,6 +392,7 @@ DuckDBPyConnection::RegisterScalarUDF(const string &name, const py::function &ud
 	}
 	auto scalar_function = CreateScalarUDF(name, udf, parameters_p, return_type_p, type == PythonUDFType::ARROW,
 	                                       null_handling, exception_handling, side_effects);
+	scalar_function.is_udf = true;
 	CreateScalarFunctionInfo info(scalar_function);
 
 	context.RegisterFunction(info);

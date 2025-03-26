@@ -7,7 +7,6 @@
 #include "duckdb/optimizer/join_order/plan_enumerator.hpp"
 #include "duckdb/planner/expression/list.hpp"
 #include "duckdb/planner/operator/list.hpp"
-
 namespace duckdb {
 
 JoinOrderOptimizer::JoinOrderOptimizer(ClientContext &context) : context(context), query_graph_manager(context) {
