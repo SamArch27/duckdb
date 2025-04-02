@@ -18,7 +18,7 @@ class Optimizer;
 
 class FilterPushdown {
 public:
-	explicit FilterPushdown(Optimizer &optimizer, bool convert_mark_joins = true);
+	explicit FilterPushdown(Optimizer &optimizer, bool udf_filter_pushdown = true, bool convert_mark_joins = true);
 
 	//! Perform filter pushdown
 	unique_ptr<LogicalOperator> Rewrite(unique_ptr<LogicalOperator> op);
@@ -42,6 +42,7 @@ public:
 private:
 	Optimizer &optimizer;
 	FilterCombiner combiner;
+	bool udf_filter_pushdown;
 	bool convert_mark_joins;
 
 	vector<unique_ptr<Filter>> filters;

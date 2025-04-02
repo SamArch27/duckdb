@@ -135,7 +135,7 @@ void Optimizer::RunBuiltInOptimizers() {
 
 	// perform filter pushdown
 	RunOptimizer(OptimizerType::FILTER_PUSHDOWN, [&]() {
-		FilterPushdown filter_pushdown(*this);
+		FilterPushdown filter_pushdown(*this, false);
 		unordered_set<idx_t> top_bindings;
 		filter_pushdown.CheckMarkToSemi(*plan, top_bindings);
 		plan = filter_pushdown.Rewrite(std::move(plan));
@@ -183,6 +183,20 @@ void Optimizer::RunBuiltInOptimizers() {
 	});
 
 	std::cout << "AFTER JOIN ORDERING" << std::endl;
+	std::cout << plan->ToString() << std::endl;
+
+	std::cout << "BEFORE UDF FILTER PUSHDOWN" << std::endl;
+	std::cout << plan->ToString() << std::endl;
+
+	// perform udf filter pushdown
+	RunOptimizer(OptimizerType::FILTER_PUSHDOWN, [&]() {
+		FilterPushdown filter_pushdown(*this, true);
+		unordered_set<idx_t> top_bindings;
+		filter_pushdown.CheckMarkToSemi(*plan, top_bindings);
+		plan = filter_pushdown.Rewrite(std::move(plan));
+	});
+
+	std::cout << "AFTER UDF FILTER PUSHDOWN" << std::endl;
 	std::cout << plan->ToString() << std::endl;
 
 	// rewrites UNNESTs in DelimJoins by moving them to the projection

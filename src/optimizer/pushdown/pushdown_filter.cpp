@@ -20,9 +20,15 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownFilter(unique_ptr<LogicalOpe
 			return make_uniq<LogicalEmptyResult>(std::move(op));
 		}
 	}
-	filter.expressions.clear();
 
-	// Collect combined filters into UDF or non-UDFs
+	// continue as normal if udf filters are being pushed down
+	if (udf_filter_pushdown) {
+		GenerateFilters();
+		return Rewrite(std::move(filter.children[0]));
+	}
+
+	// otherwise split filters into UDFs and non-UDFs and push down non-UDFs
+	filter.expressions.clear();
 	vector<unique_ptr<Expression>> udfs, non_udfs;
 
 	combiner.GenerateFilters([&](unique_ptr<Expression> expr) {
