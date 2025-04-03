@@ -13,8 +13,15 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownFilter(unique_ptr<LogicalOpe
 		return FinishPushdown(std::move(op));
 	}
 
+	vector<unique_ptr<Expression>> udf_filters;
+	vector<unique_ptr<Expression>> non_udf_filters;
+
 	// filter: gather the filters and remove the filter from the set of operations
 	for (auto &expression : filter.expressions) {
+		if (expression->ContainsUDF()) {
+			udf_filters.push_back(expression->Copy());
+		}
+
 		if (AddFilter(std::move(expression)) == FilterResult::UNSATISFIABLE) {
 			// filter statically evaluates to false, strip tree
 			return make_uniq<LogicalEmptyResult>(std::move(op));
@@ -24,7 +31,19 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownFilter(unique_ptr<LogicalOpe
 	// continue as normal if udf filters are being pushed down
 	if (udf_filter_pushdown) {
 		GenerateFilters();
-		return Rewrite(std::move(filter.children[0]));
+
+		// rewrite the operator tree with the pushed filters
+		auto new_child = Rewrite(std::move(filter.children[0]));
+
+		unique_ptr<LogicalOperator> current_op = std::move(new_child);
+		for (auto &expr : udf_filters) {
+			auto dup_filter = make_uniq<LogicalFilter>();
+			dup_filter->expressions.push_back(std::move(expr));
+			dup_filter->children.push_back(std::move(current_op));
+			current_op = std::move(dup_filter);
+		}
+
+		return std::move(current_op);
 	}
 
 	// otherwise split filters into UDFs and non-UDFs and push down non-UDFs

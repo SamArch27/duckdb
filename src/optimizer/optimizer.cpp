@@ -190,6 +190,7 @@ void Optimizer::RunBuiltInOptimizers() {
 
 	// perform udf filter pushdown
 	RunOptimizer(OptimizerType::FILTER_PUSHDOWN, [&]() {
+		// The boolean indicates that it is the udf version.
 		FilterPushdown filter_pushdown(*this, true);
 		unordered_set<idx_t> top_bindings;
 		filter_pushdown.CheckMarkToSemi(*plan, top_bindings);
