@@ -96,49 +96,88 @@ FilterPushdown::FilterPushdown(Optimizer &optimizer, bool udf_filter_pushdown, b
 
 unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> op) {
 	D_ASSERT(!combiner.HasFilters());
+
+	unique_ptr<LogicalOperator> result;
+	vector<unique_ptr<Expression>> udf_expressions;
+
+	if (udf_filter_pushdown) {
+		for (auto &filter : filters) {
+			if (filter) {
+				if (auto &expr = filter->filter) {
+					if (expr->ContainsUDF()) {
+						udf_expressions.push_back(expr->Copy());
+					}
+				}
+			}
+		}
+	}
+
 	switch (op->type) {
 	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY:
-		return PushdownAggregate(std::move(op));
+		result = PushdownAggregate(std::move(op));
+		break;
 	case LogicalOperatorType::LOGICAL_FILTER:
-		return PushdownFilter(std::move(op));
+		result = PushdownFilter(std::move(op));
+		break;
 	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
-		return PushdownCrossProduct(std::move(op));
+		result = PushdownCrossProduct(std::move(op));
+		break;
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
 	case LogicalOperatorType::LOGICAL_ANY_JOIN:
 	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
 	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
-		return PushdownJoin(std::move(op));
+		result = PushdownJoin(std::move(op));
+		break;
 	case LogicalOperatorType::LOGICAL_PROJECTION:
-		return PushdownProjection(std::move(op));
+		result = PushdownProjection(std::move(op));
+		break;
 	case LogicalOperatorType::LOGICAL_INTERSECT:
 	case LogicalOperatorType::LOGICAL_EXCEPT:
 	case LogicalOperatorType::LOGICAL_UNION:
-		return PushdownSetOperation(std::move(op));
+		result = PushdownSetOperation(std::move(op));
+		break;
 	case LogicalOperatorType::LOGICAL_DISTINCT:
-		return PushdownDistinct(std::move(op));
+		result = PushdownDistinct(std::move(op));
+		break;
 	case LogicalOperatorType::LOGICAL_ORDER_BY:
 		// we can just push directly through these operations without any rewriting
 		op->children[0] = Rewrite(std::move(op->children[0]));
-		return op;
+		result = std::move(op);
+		break;
 	case LogicalOperatorType::LOGICAL_MATERIALIZED_CTE: {
 		// we can't push filters into the materialized CTE (LHS), but we do want to recurse into it
 		FilterPushdown pushdown(optimizer, udf_filter_pushdown, convert_mark_joins);
 		op->children[0] = pushdown.Rewrite(std::move(op->children[0]));
 		// we can push filters into the rest of the query plan (RHS)
 		op->children[1] = Rewrite(std::move(op->children[1]));
-		return op;
+		result = std::move(op);
+		break;
 	}
 	case LogicalOperatorType::LOGICAL_GET:
-		return PushdownGet(std::move(op));
+		result = PushdownGet(std::move(op));
+		break;
 	case LogicalOperatorType::LOGICAL_LIMIT:
-		return PushdownLimit(std::move(op));
+		result = PushdownLimit(std::move(op));
+		break;
 	case LogicalOperatorType::LOGICAL_WINDOW:
-		return PushdownWindow(std::move(op));
+		result = PushdownWindow(std::move(op));
+		break;
 	case LogicalOperatorType::LOGICAL_UNNEST:
-		return PushdownUnnest(std::move(op));
+		result = PushdownUnnest(std::move(op));
+		break;
 	default:
-		return FinishPushdown(std::move(op));
+		result = FinishPushdown(std::move(op));
+		break;
 	}
+
+	// attach UDF filter above
+	for (auto &expr : udf_expressions) {
+		auto dup_filter = make_uniq<LogicalFilter>();
+		dup_filter->expressions.push_back(expr->Copy());
+		dup_filter->children.push_back(std::move(result));
+		result = std::move(dup_filter);
+	}
+	return result;
 }
 
 ClientContext &FilterPushdown::GetContext() {
@@ -228,10 +267,10 @@ unique_ptr<LogicalOperator> FilterPushdown::AddLogicalFilter(unique_ptr<LogicalO
 		// set the filter's estimated cardinality as the child op's.
 		// if the filter is created during the filter pushdown optimization, the estimated cardinality will be later
 		// overridden during the join order optimization to a more accurate one.
-		// if the filter is created during the statistics propagation, the estimated cardinality won't be set unless set
-		// here. assuming the filters introduced during the statistics propagation have little effect in reducing the
-		// cardinality, we adopt the the cardinality of the child. this could be improved by MinMax info from the
-		// statistics propagation
+		// if the filter is created during the statistics propagation, the estimated cardinality won't be set unless
+		// set here. assuming the filters introduced during the statistics propagation have little effect in
+		// reducing the cardinality, we adopt the the cardinality of the child. this could be improved by MinMax
+		// info from the statistics propagation
 		filter->SetEstimatedCardinality(op->estimated_cardinality);
 	}
 	filter->expressions = std::move(expressions);
