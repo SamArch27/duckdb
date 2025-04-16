@@ -116,9 +116,22 @@ unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> 
 	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY:
 		result = PushdownAggregate(std::move(op));
 		break;
-	case LogicalOperatorType::LOGICAL_FILTER:
+	case LogicalOperatorType::LOGICAL_FILTER: {
 		result = PushdownFilter(std::move(op));
+		auto &exprs = result->Cast<LogicalFilter>().expressions;
+		// if the filter contains only udf predicates we are pushing down already, don't add the filter again
+		if (std::all_of(exprs.begin(), exprs.end(), [&](unique_ptr<Expression> &expr) {
+			    for (auto &udf_expr : udf_expressions) {
+				    if (Expression::Equals(udf_expr, expr)) {
+					    return true;
+				    }
+			    }
+			    return false;
+		    })) {
+			return result;
+		}
 		break;
+	}
 	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
 		result = PushdownCrossProduct(std::move(op));
 		break;
@@ -170,12 +183,14 @@ unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> 
 		break;
 	}
 
-	// attach UDF filter above
-	for (auto &expr : udf_expressions) {
-		auto dup_filter = make_uniq<LogicalFilter>();
-		dup_filter->expressions.push_back(expr->Copy());
-		dup_filter->children.push_back(std::move(result));
-		result = std::move(dup_filter);
+	if (udf_filter_pushdown) {
+		// attach UDF filters above
+		for (auto &expr : udf_expressions) {
+			auto dup_filter = make_uniq<LogicalFilter>();
+			dup_filter->expressions.push_back(expr->Copy());
+			dup_filter->children.push_back(std::move(result));
+			result = std::move(dup_filter);
+		}
 	}
 	return result;
 }
