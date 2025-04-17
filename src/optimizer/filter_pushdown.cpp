@@ -118,16 +118,18 @@ unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> 
 		break;
 	case LogicalOperatorType::LOGICAL_FILTER: {
 		// if the filter contains only udf predicates we are pushing down already, don't add the filter again
-		auto &exprs = op->Cast<LogicalFilter>().expressions;
-		if (std::all_of(exprs.begin(), exprs.end(), [&](unique_ptr<Expression> &expr) {
-			    for (auto &udf_expr : udf_expressions) {
-				    if (Expression::Equals(udf_expr, expr)) {
-					    return true;
+		if (udf_filter_pushdown) {
+			auto &exprs = op->Cast<LogicalFilter>().expressions;
+			if (std::all_of(exprs.begin(), exprs.end(), [&](unique_ptr<Expression> &expr) {
+				    for (auto &udf_expr : udf_expressions) {
+					    if (Expression::Equals(udf_expr, expr)) {
+						    return true;
+					    }
 				    }
-			    }
-			    return false;
-		    })) {
-			return PushdownFilter(std::move(op));
+				    return false;
+			    })) {
+				return PushdownFilter(std::move(op));
+			}
 		}
 		result = PushdownFilter(std::move(op));
 		break;
