@@ -117,9 +117,8 @@ unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> 
 		result = PushdownAggregate(std::move(op));
 		break;
 	case LogicalOperatorType::LOGICAL_FILTER: {
-		result = PushdownFilter(std::move(op));
-		auto &exprs = result->Cast<LogicalFilter>().expressions;
 		// if the filter contains only udf predicates we are pushing down already, don't add the filter again
+		auto &exprs = op->Cast<LogicalFilter>().expressions;
 		if (std::all_of(exprs.begin(), exprs.end(), [&](unique_ptr<Expression> &expr) {
 			    for (auto &udf_expr : udf_expressions) {
 				    if (Expression::Equals(udf_expr, expr)) {
@@ -128,8 +127,9 @@ unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> 
 			    }
 			    return false;
 		    })) {
-			return result;
+			return PushdownFilter(std::move(op));
 		}
+		result = PushdownFilter(std::move(op));
 		break;
 	}
 	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
