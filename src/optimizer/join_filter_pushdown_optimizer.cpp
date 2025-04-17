@@ -1,5 +1,4 @@
 #include "duckdb/optimizer/join_filter_pushdown_optimizer.hpp"
-
 #include "duckdb/execution/operator/join/join_filter_pushdown.hpp"
 #include "duckdb/execution/operator/join/physical_comparison_join.hpp"
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"

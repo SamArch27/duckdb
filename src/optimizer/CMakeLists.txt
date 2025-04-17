@@ -24,6 +24,7 @@ add_library_unity(
   filter_pullup.cpp
   filter_pushdown.cpp
   in_clause_rewriter.cpp
+  adaptive_udf.cpp
   join_filter_pushdown_optimizer.cpp
   late_materialization.cpp
   optimizer.cpp
