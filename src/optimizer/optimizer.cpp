@@ -300,7 +300,7 @@ void Optimizer::RunBuiltInOptimizers() {
 	// perform UDF plan rewriting (adaptivity)
 	RunOptimizer(OptimizerType::ADAPTIVE_UDF, [&]() {
 		AdaptiveUDF adaptive_udf(*this);
-		adaptive_udf.VisitOperator(*plan);
+		plan = adaptive_udf.Rewrite(std::move(plan));
 	});
 	std::cout << "AFTER UDF PLAN REWRITING:\n" << std::endl;
 	std::cout << plan->ToString() << std::endl;

@@ -14,12 +14,12 @@ namespace duckdb {
 class Optimizer;
 
 //! The AdaptiveUDF pass rewrites the query plan to adaptively evaluate UDF predicates
-class AdaptiveUDF : public LogicalOperatorVisitor {
+class AdaptiveUDF {
 public:
 	explicit AdaptiveUDF(Optimizer &optimizer);
 
 public:
-	void VisitOperator(LogicalOperator &op) override;
+	unique_ptr<LogicalOperator> Rewrite(unique_ptr<LogicalOperator> op);
 
 private:
 	Optimizer &optimizer;
