@@ -13,8 +13,10 @@ AdaptiveUDF::AdaptiveUDF(Optimizer &optimizer) : optimizer(optimizer) {
 
 unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOperator> op) {
 	D_ASSERT(op->type == LogicalOperatorType::LOGICAL_FILTER);
+
 	unordered_map<LogicalOperator *, LogicalOperator *> parent;
 	queue<LogicalOperator *> q;
+	LogicalOperator *match = nullptr;
 	q.push(op.get());
 	while (!q.empty()) {
 		auto *curr = q.front();
@@ -32,8 +34,9 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 						if (child_filter.IsUDFFilter()) {
 							D_ASSERT(child_filter.expressions.size() == 1);
 							if (Expression::Equals(filter.expressions[0], child_filter.expressions[0])) {
-								std::cout << "Match on op: \n" << std::endl;
-								std::cout << filter.ToString() << std::endl;
+								parent[child.get()] = curr;
+								match = child.get();
+								break;
 							}
 						}
 					}
@@ -47,10 +50,26 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		}
 	}
 
-	// TODO:
-	// 1. BFS to find the double UDF filter at the bottom
-	// 2. Backtrack the path
-	// 3. Modify all of the nodes along that path as required
+	D_ASSERT(match != nullptr);
+
+	// backtrack the parent to produce the stream
+	vector<LogicalOperator *> stream;
+	stream.push_back(match);
+	while (true) {
+		auto it = parent.find(stream.back());
+		if (it == parent.end()) {
+			break;
+		}
+		stream.push_back(it->second);
+	}
+
+	// reverse the stream to get the right order
+	std::reverse(stream.begin(), stream.end());
+
+	for (auto *op : stream) {
+		std::cout << op->ToString() << std::endl;
+	}
+
 	return op;
 }
 
