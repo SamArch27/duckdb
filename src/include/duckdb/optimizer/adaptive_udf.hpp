@@ -22,6 +22,8 @@ public:
 	unique_ptr<LogicalOperator> Rewrite(unique_ptr<LogicalOperator> op);
 
 private:
+	unique_ptr<LogicalOperator> RewriteUDFSubPlan(unique_ptr<LogicalOperator> op);
+
 	Optimizer &optimizer;
 };
 } // namespace duckdb

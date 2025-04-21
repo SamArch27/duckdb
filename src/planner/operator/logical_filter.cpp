@@ -15,6 +15,11 @@ void LogicalFilter::ResolveTypes() {
 	types = MapTypes(children[0]->types, projection_map);
 }
 
+bool LogicalFilter::IsUDFFilter() const {
+	return std::all_of(expressions.begin(), expressions.end(),
+	                   [&](const unique_ptr<Expression> &expr) { return expr->ContainsUDF(); });
+}
+
 vector<ColumnBinding> LogicalFilter::GetColumnBindings() {
 	return MapBindings(children[0]->GetColumnBindings(), projection_map);
 }
