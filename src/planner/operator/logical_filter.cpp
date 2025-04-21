@@ -16,9 +16,8 @@ void LogicalFilter::ResolveTypes() {
 }
 
 bool LogicalFilter::IsUDFFilter() const {
-	return std::all_of(expressions.begin(), expressions.end(),
-	                   [&](const unique_ptr<Expression> &expr) { return expr->ContainsUDF(); });
-}
+	return expressions.size() == 1 && expressions[0]->ContainsUDF();
+} // namespace duckdb
 
 vector<ColumnBinding> LogicalFilter::GetColumnBindings() {
 	return MapBindings(children[0]->GetColumnBindings(), projection_map);

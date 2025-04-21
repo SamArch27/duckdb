@@ -1,6 +1,9 @@
 #include "duckdb/optimizer/adaptive_udf.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/common/queue.hpp"
+#include "duckdb/common/unordered_map.hpp"
+
 #include <iostream>
 
 namespace duckdb {
@@ -10,9 +13,44 @@ AdaptiveUDF::AdaptiveUDF(Optimizer &optimizer) : optimizer(optimizer) {
 
 unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOperator> op) {
 	D_ASSERT(op->type == LogicalOperatorType::LOGICAL_FILTER);
-	auto &filter = op->Cast<LogicalFilter>();
-	std::cout << "Rewriting from sub-plan starting from: \n" << std::endl;
-	std::cout << op->ToString() << std::endl;
+	unordered_map<LogicalOperator *, LogicalOperator *> parent;
+	queue<LogicalOperator *> q;
+	q.push(op.get());
+	while (!q.empty()) {
+		auto *curr = q.front();
+		q.pop();
+
+		// If we have two identical UDF filters then it's a match!
+		if (curr->type == LogicalOperatorType::LOGICAL_FILTER) {
+			auto &filter = curr->Cast<LogicalFilter>();
+			if (filter.IsUDFFilter()) {
+				D_ASSERT(filter.expressions.size() == 1);
+				if (!filter.children.empty()) {
+					auto &child = filter.children[0];
+					if (child->type == LogicalOperatorType::LOGICAL_FILTER) {
+						auto &child_filter = child->Cast<LogicalFilter>();
+						if (child_filter.IsUDFFilter()) {
+							D_ASSERT(child_filter.expressions.size() == 1);
+							if (Expression::Equals(filter.expressions[0], child_filter.expressions[0])) {
+								std::cout << "Match on op: \n" << std::endl;
+								std::cout << filter.ToString() << std::endl;
+							}
+						}
+					}
+				}
+			}
+		}
+
+		for (auto &child : curr->children) {
+			parent[child.get()] = curr;
+			q.push(child.get());
+		}
+	}
+
+	// TODO:
+	// 1. BFS to find the double UDF filter at the bottom
+	// 2. Backtrack the path
+	// 3. Modify all of the nodes along that path as required
 	return op;
 }
 
