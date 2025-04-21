@@ -1,9 +1,10 @@
 #include "duckdb/optimizer/adaptive_udf.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/common/queue.hpp"
 #include "duckdb/common/unordered_map.hpp"
-
+#include "duckdb/planner/binder.hpp"
 #include <iostream>
 
 namespace duckdb {
@@ -34,8 +35,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 						if (child_filter.IsUDFFilter()) {
 							D_ASSERT(child_filter.expressions.size() == 1);
 							if (Expression::Equals(filter.expressions[0], child_filter.expressions[0])) {
-								parent[child.get()] = curr;
-								match = child.get();
+								match = curr;
 								break;
 							}
 						}
@@ -67,11 +67,42 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	std::reverse(stream.begin(), stream.end());
 
 	for (auto *op : stream) {
-		std::cout << op->ToString() << std::endl;
+		switch (op->type) {
+		case LogicalOperatorType::LOGICAL_FILTER:
+		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+			break;
+		default:
+			std::cout << "Error: Unsupported construct for UDF filter pushing " << std::endl;
+			std::cout << "Operating is: \n" << std::endl;
+			std::cout << op->ToString() << std::endl;
+			D_ASSERT(false);
+		}
 	}
 
+	// stick a project between this filter and the lowest UDF filter
+	auto *last_filter = stream.back();
+
+	vector<unique_ptr<Expression>> project_expr;
+	project_expr.emplace_back(make_uniq<BoundConstantExpression>(Value::INTEGER(42)));
+	auto project = make_uniq<LogicalProjection>(optimizer.binder.GenerateTableIndex(), std::move(project_expr));
+
+	std::cout << "Project: \n" << std::endl;
+	std::cout << project->ToString() << std::endl;
+
+	// TODO:
+	// 1. Add a projection node for "best" above the lowest UDF filter with a hardcoded value
+	// 2. Pull-up the project up (by adding the column) through all of the nodes in the sub-plan
+	// 3. Rewrite each of the UDF filters to the form: ((best != k) OR (best = k AND udf(...)))
+
+	// Next TODO:
+	// 4. Compute cost formulas for each plan
+
+	// After Kyle's part TODO:
+	// 5. Make the projection plug in the batch cost/selectivity from the lowest filter when computing the "best"
+	// value
+
 	return op;
-}
+} // namespace duckdb
 
 unique_ptr<LogicalOperator> AdaptiveUDF::Rewrite(unique_ptr<LogicalOperator> op) {
 
@@ -88,15 +119,6 @@ unique_ptr<LogicalOperator> AdaptiveUDF::Rewrite(unique_ptr<LogicalOperator> op)
 	}
 
 	return op;
-
-	// TODO:
-	// 1. Find the sub-plan containing the UDF predicate filters (highest and lowest UDF filters)
-	// 2. Add a projection node for "best" above the lowest UDF filter with a hardcoded value
-	// 3. Pull-up the project up (by adding the column) through all of the nodes in the sub-plan
-	// 4. Rewrite each of the UDF filters to the form: ((best != k) OR (best = k AND udf(...)))
-	// 5. Compute cost formulas for each plan
-	// 6. Make the projection plug in the batch cost/selectivity from the lowest filter when computing the "best"
-	// value
 }
 
 } // namespace duckdb
