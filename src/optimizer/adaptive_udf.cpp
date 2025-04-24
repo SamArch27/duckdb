@@ -5,6 +5,8 @@
 #include "duckdb/common/queue.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/execution/column_binding_resolver.hpp"
+
 #include <iostream>
 
 namespace duckdb {
@@ -82,23 +84,50 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	// stick a project between this filter and the lowest UDF filter
 	auto *last_filter = stream.back();
 
-	vector<unique_ptr<Expression>> project_expr;
-	project_expr.emplace_back(make_uniq<BoundConstantExpression>(Value::INTEGER(42)));
-	auto project = make_uniq<LogicalProjection>(optimizer.binder.GenerateTableIndex(), std::move(project_expr));
+	// re-project the expressions below
+	auto &node = last_filter->children[0];
+	auto bindings = node->GetColumnBindings();
+	node->ResolveOperatorTypes();
+	auto types = node->types;
+	vector<unique_ptr<Expression>> project_expressions;
+	project_expressions.reserve(bindings.size() + 1);
+	D_ASSERT(bindings.size() == types.size());
+	idx_t new_tbl_idx = optimizer.binder.GenerateTableIndex();
+	idx_t tbl_idx = bindings[0].table_index;
+	for (idx_t col_idx = 0; col_idx < bindings.size(); col_idx++) {
+		D_ASSERT(tbl_idx == bindings[col_idx].table_index);
+		project_expressions.emplace_back(make_uniq<BoundColumnRefExpression>(types[col_idx], bindings[col_idx]));
+	}
+	// project a new column for "best"
+	project_expressions.emplace_back(make_uniq<BoundConstantExpression>(Value::INTEGER(42)));
+	// make the projection node
+	auto project = make_uniq<LogicalProjection>(new_tbl_idx, std::move(project_expressions));
+	// propagate the cardinality of the node below
+	if (last_filter->children[0]->has_estimated_cardinality) {
+		project->SetEstimatedCardinality(last_filter->children[0]->estimated_cardinality);
+	}
 
-	std::cout << "Project: \n" << std::endl;
-	std::cout << project->ToString() << std::endl;
+	// resolve the column bindings
+	ColumnBindingResolver resolver;
+	resolver.VisitOperator(*op);
+
+	// attach the node below as a child of the project
+	project->AddChild(std::move(last_filter->children[0]));
+
+	// attach the project as a child of the parent
+	last_filter->children[0] = std::move(project);
+
+	// resolve the columns again
+	resolver.VisitOperator(*op);
 
 	// TODO:
-	// 1. Add a projection node for "best" above the lowest UDF filter with a hardcoded value
-	// 2. Pull-up the project up (by adding the column) through all of the nodes in the sub-plan
-	// 3. Rewrite each of the UDF filters to the form: ((best != k) OR (best = k AND udf(...)))
+	// 1. Rewrite each of the UDF filters to the form: (best != k OR udf(...))
 
 	// Next TODO:
-	// 4. Compute cost formulas for each plan
+	// 2. Compute cost formulas for each plan
 
 	// After Kyle's part TODO:
-	// 5. Make the projection plug in the batch cost/selectivity from the lowest filter when computing the "best"
+	// 3. Make the projection plug in the batch cost/selectivity from the lowest filter when computing the "best"
 	// value
 
 	return op;
