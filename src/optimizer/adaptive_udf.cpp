@@ -2,6 +2,9 @@
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/queue.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/planner/binder.hpp"
@@ -14,13 +17,13 @@ namespace duckdb {
 AdaptiveUDF::AdaptiveUDF(Optimizer &optimizer) : optimizer(optimizer) {
 }
 
-unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOperator> op) {
-	D_ASSERT(op->type == LogicalOperatorType::LOGICAL_FILTER);
+unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOperator> root_filter) {
+	D_ASSERT(root_filter->type == LogicalOperatorType::LOGICAL_FILTER);
 
 	unordered_map<LogicalOperator *, LogicalOperator *> parent;
 	queue<LogicalOperator *> q;
 	LogicalOperator *match = nullptr;
-	q.push(op.get());
+	q.push(root_filter.get());
 	while (!q.empty()) {
 		auto *curr = q.front();
 		q.pop();
@@ -109,7 +112,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 
 	// resolve the column bindings
 	ColumnBindingResolver resolver;
-	resolver.VisitOperator(*op);
+	resolver.VisitOperator(*root_filter);
 
 	// attach the node below as a child of the project
 	project->AddChild(std::move(last_filter->children[0]));
@@ -118,7 +121,39 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	last_filter->children[0] = std::move(project);
 
 	// resolve the columns again
-	resolver.VisitOperator(*op);
+	resolver.VisitOperator(*root_filter);
+
+	// grab the binding for the "best" column
+	auto &new_project = last_filter->children[0];
+	auto project_bindings = new_project->GetColumnBindings();
+	new_project->ResolveOperatorTypes();
+	auto project_types = new_project->types;
+	auto project_reference = make_uniq<BoundColumnRefExpression>("best", project_types.back(), project_bindings.back());
+
+	// rewrite any UDF filter in the stream to be of the form (best != k OR udf(...))
+	std::reverse(stream.begin(), stream.end());
+	auto placement = 0;
+	for (auto &op : stream) {
+		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+			auto &filter = op->Cast<LogicalFilter>();
+			if (filter.IsUDFFilter()) {
+				// std::cout << "Adding filter to op: \n" << op->ToString() << std::endl;
+				// // rewrite udf(...) to (best != k OR udf(...))
+				// ++placement;
+				// // create best != k
+				// auto comparison =
+				//     make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_NOTEQUAL, project_reference->Copy(),
+				//                                          make_uniq<BoundConstantExpression>(Value::INTEGER(placement)));
+				// // disjunct it with the original UDF expression
+				// auto disjunction = make_uniq<BoundConjunctionExpression>(
+				//     ExpressionType::CONJUNCTION_OR, std::move(comparison), std::move(filter.expressions[0]));
+				// filter.expressions[0] = std::move(disjunction);
+			}
+		}
+	}
+
+	// resolve the columns again
+	resolver.VisitOperator(*root_filter);
 
 	// TODO:
 	// 1. Rewrite each of the UDF filters to the form: (best != k OR udf(...))
@@ -130,7 +165,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	// 3. Make the projection plug in the batch cost/selectivity from the lowest filter when computing the "best"
 	// value
 
-	return op;
+	return root_filter;
 } // namespace duckdb
 
 unique_ptr<LogicalOperator> AdaptiveUDF::Rewrite(unique_ptr<LogicalOperator> op) {
