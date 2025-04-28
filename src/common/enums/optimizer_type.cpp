@@ -35,6 +35,7 @@ static const DefaultOptimizerType internal_optimizer_types[] = {
     {"reorder_filter", OptimizerType::REORDER_FILTER},
     {"sampling_pushdown", OptimizerType::SAMPLING_PUSHDOWN},
     {"join_filter_pushdown", OptimizerType::JOIN_FILTER_PUSHDOWN},
+    {"adaptive_udf", OptimizerType::ADAPTIVE_UDF},
     {"extension", OptimizerType::EXTENSION},
     {"materialized_cte", OptimizerType::MATERIALIZED_CTE},
     {"sum_rewriter", OptimizerType::SUM_REWRITER},

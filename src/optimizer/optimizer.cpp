@@ -35,6 +35,7 @@
 #include "duckdb/optimizer/late_materialization.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/planner.hpp"
+#include <iostream>
 
 namespace duckdb {
 
@@ -292,6 +293,17 @@ void Optimizer::RunBuiltInOptimizers() {
 		JoinFilterPushdownOptimizer join_filter_pushdown(*this);
 		join_filter_pushdown.VisitOperator(*plan);
 	});
+
+	std::cout << "BEFORE UDF PLAN REWRITING:\n" << std::endl;
+	std::cout << plan->ToString() << std::endl;
+
+	// perform UDF plan rewriting (adaptivity)
+	RunOptimizer(OptimizerType::ADAPTIVE_UDF, [&]() {
+		AdaptiveUDF adaptive_udf(*this);
+		plan = adaptive_udf.Rewrite(std::move(plan));
+	});
+	std::cout << "AFTER UDF PLAN REWRITING:\n" << std::endl;
+	std::cout << plan->ToString() << std::endl;
 }
 
 unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p) {

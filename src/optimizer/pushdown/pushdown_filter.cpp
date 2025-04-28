@@ -32,18 +32,7 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownFilter(unique_ptr<LogicalOpe
 	if (udf_filter_pushdown) {
 		GenerateFilters();
 
-		// rewrite the operator tree with the pushed filters
-		auto new_child = Rewrite(std::move(filter.children[0]));
-
-		unique_ptr<LogicalOperator> current_op = std::move(new_child);
-		for (auto &expr : udf_filters) {
-			auto dup_filter = make_uniq<LogicalFilter>();
-			dup_filter->expressions.push_back(std::move(expr));
-			dup_filter->children.push_back(std::move(current_op));
-			current_op = std::move(dup_filter);
-		}
-
-		return std::move(current_op);
+		return Rewrite(std::move(filter.children[0]));
 	}
 
 	// otherwise split filters into UDFs and non-UDFs and push down non-UDFs

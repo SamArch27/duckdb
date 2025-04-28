@@ -24,6 +24,8 @@ public:
 	vector<idx_t> projection_map;
 
 public:
+	bool IsUDFFilter() const;
+
 	vector<ColumnBinding> GetColumnBindings() override;
 
 	bool HasProjectionMap() const override {
