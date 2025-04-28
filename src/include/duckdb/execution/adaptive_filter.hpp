@@ -12,7 +12,7 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/chrono.hpp"
 #include "duckdb/common/random_engine.hpp"
-
+#include "duckdb/common/types.hpp"
 namespace duckdb {
 
 struct AdaptiveFilterState {
@@ -24,7 +24,7 @@ public:
 	explicit AdaptiveFilter(const Expression &expr);
 	explicit AdaptiveFilter(const TableFilterSet &table_filters);
 
-	vector<idx_t> permutation;
+	vector<optional_idx> permutation;
 
 public:
 	void AdaptRuntimeStatistics(double duration);

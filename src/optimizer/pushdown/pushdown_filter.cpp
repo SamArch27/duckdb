@@ -85,3 +85,4 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownFilter(unique_ptr<LogicalOpe
 }
 
 } // namespace duckdb
+

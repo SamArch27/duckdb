@@ -24,6 +24,7 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 
 AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters)
     : observe_interval(10), execute_interval(20), warmup(true) {
+	// TODO: Rewrite to have the initial order return 
 	permutation = ExpressionHeuristics::GetInitialOrder(table_filters);
 	for (idx_t idx = 1; idx < table_filters.filters.size(); idx++) {
 		swap_likeliness.push_back(100);

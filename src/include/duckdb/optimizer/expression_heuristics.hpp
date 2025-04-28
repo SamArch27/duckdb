@@ -31,7 +31,7 @@ public:
 	//! Return the cost of an expression
 	static idx_t Cost(Expression &expr);
 
-	static vector<idx_t> GetInitialOrder(const TableFilterSet &table_filters);
+	static vector<optional_idx> GetInitialOrder(const TableFilterSet &table_filters);
 
 	unique_ptr<Expression> VisitReplace(BoundConjunctionExpression &expr, unique_ptr<Expression> *expr_ptr) override;
 	//! Override this function to search for filter operators
