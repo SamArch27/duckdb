@@ -76,32 +76,27 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 		for (idx_t i = 0; i < expr.children.size(); i++) {
 			// Extract the valid index from the optional
 			auto idx = state.adaptive_filter->permutation[i];
-			if (idx.IsValid()) {  // Check if it's valid
-				idx_t index = idx.GetIndex();
-				// Select using the valid index
-				idx_t tcount = Select(*expr.children[index],
-				                      state.child_states[index].get(), current_sel, current_count, true_sel, temp_false.get());
-				idx_t fcount = current_count - tcount;
-				if (fcount > 0 && false_sel) {
-					// move failing tuples into the false_sel
-					// tuples passed, move them into the actual result vector
-					for (idx_t i = 0; i < fcount; i++) {
-						false_sel->set_index(false_count++, temp_false->get_index(i));
-					}
+			if (!idx.IsValid()) { continue; }
+			idx_t index = idx.GetIndex();
+			// Select using the valid index
+			idx_t tcount = Select(*expr.children[index],
+								  state.child_states[index].get(), current_sel, current_count, true_sel, temp_false.get());
+			idx_t fcount = current_count - tcount;
+			if (fcount > 0 && false_sel) {
+				// move failing tuples into the false_sel
+				// tuples passed, move them into the actual result vector
+				for (idx_t i = 0; i < fcount; i++) {
+					false_sel->set_index(false_count++, temp_false->get_index(i));
 				}
-				current_count = tcount;
-				if (current_count == 0) {
-					break;
-				}
-				if (current_count < count) {
-					// tuples were filtered out: move on to using the true_sel to only evaluate passing tuples in subsequent
-					// iterations
-					current_sel = true_sel;
-				}
-			} else {
-				// Handle invalid index (optional is not set)
-				// You can decide what action to take in this case (skip or error out)
-				throw InternalException("Invalid index in permutation array!");
+			}
+			current_count = tcount;
+			if (current_count == 0) {
+				break;
+			}
+			if (current_count < count) {
+				// tuples were filtered out: move on to using the true_sel to only evaluate passing tuples in subsequent
+				// iterations
+				current_sel = true_sel;
 			}
 		}
 		// adapt runtime statistics

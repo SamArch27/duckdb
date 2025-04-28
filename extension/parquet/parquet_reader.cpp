@@ -1102,26 +1102,25 @@ bool ParquetReader::ScanInternal(ClientContext &context, ParquetReaderScanState 
 				// if no rows are left we can stop checking filters
 				break;
 			}
-			if (state.adaptive_filter->permutation[i].IsValid()) {
-				auto &scan_filter = state.scan_filters[state.adaptive_filter->permutation[i].GetIndex()];
-				auto filter_entry = reader_data.filter_map[scan_filter.filter_idx];
-				if (filter_entry.is_constant) {
-					// this is a constant vector, look for the constant
-					auto &constant = reader_data.constant_map[filter_entry.index].value;
-					Vector constant_vector(constant);
-					ColumnReader::ApplyFilter(constant_vector, scan_filter.filter, *scan_filter.filter_state, scan_count,
-					                          state.sel, filter_count);
-				} else {
-					auto id = filter_entry.index;
-					auto file_col_idx = reader_data.column_ids[id];
-					auto result_idx = reader_data.column_mapping[id];
+			if (!state.adaptive_filter->permutation[i].IsValid()) { continue; }
+			auto &scan_filter = state.scan_filters[state.adaptive_filter->permutation[i].GetIndex()];
+			auto filter_entry = reader_data.filter_map[scan_filter.filter_idx];
+			if (filter_entry.is_constant) {
+				// this is a constant vector, look for the constant
+				auto &constant = reader_data.constant_map[filter_entry.index].value;
+				Vector constant_vector(constant);
+				ColumnReader::ApplyFilter(constant_vector, scan_filter.filter, *scan_filter.filter_state, scan_count,
+										  state.sel, filter_count);
+			} else {
+				auto id = filter_entry.index;
+				auto file_col_idx = reader_data.column_ids[id];
+				auto result_idx = reader_data.column_mapping[id];
 
-					auto &result_vector = result.data[result_idx];
-					auto &child_reader = root_reader.GetChildReader(file_col_idx);
-					child_reader.Filter(scan_count, define_ptr, repeat_ptr, result_vector, scan_filter.filter,
-										*scan_filter.filter_state, state.sel, filter_count, i == 0);
-					need_to_read[id] = false;
-				}
+				auto &result_vector = result.data[result_idx];
+				auto &child_reader = root_reader.GetChildReader(file_col_idx);
+				child_reader.Filter(scan_count, define_ptr, repeat_ptr, result_vector, scan_filter.filter,
+									*scan_filter.filter_state, state.sel, filter_count, i == 0);
+				need_to_read[id] = false;
 			}
 		}
 		state.adaptive_filter->EndFilter(filter_state);
