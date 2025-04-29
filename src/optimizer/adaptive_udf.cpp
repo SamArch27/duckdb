@@ -218,6 +218,11 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 				auto offset = std::distance(right_bindings.begin(), right_it);
 				std::cout << "Adding offset: " << offset << " to right projection map!" << std::endl;
 				std::cout << "Binding at offset is: " << right_bindings[offset].ToString() << std::endl;
+				for (auto &b : join.right_projection_map) {
+					if (b >= offset) {
+						++b;
+					}
+				}
 				join.right_projection_map.push_back(offset);
 			}
 
@@ -249,6 +254,11 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 				auto offset = std::distance(child_bindings.begin(), it);
 				std::cout << "Adding offset: " << offset << " to projection map!" << std::endl;
 				std::cout << "Binding at offset is: " << child_bindings[offset].ToString() << std::endl;
+				for (auto &b : filter.projection_map) {
+					if (b >= offset) {
+						++b;
+					}
+				}
 				filter.projection_map.push_back(offset);
 
 				std::cout << "Projection map after: " << std::endl;
