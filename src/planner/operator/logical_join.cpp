@@ -1,5 +1,5 @@
 #include "duckdb/planner/operator/logical_join.hpp"
-
+#include <iostream>
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 
@@ -26,6 +26,23 @@ vector<ColumnBinding> LogicalJoin::GetColumnBindings() {
 	if (join_type == JoinType::RIGHT_SEMI || join_type == JoinType::RIGHT_ANTI) {
 		return right_bindings;
 	}
+	// std::cout << "LogicalJoin::GetColumnBindings(...)" << std::endl;
+	// std::cout << "Left bindings BEFORE applying projection map: " << std::endl;
+	// for (auto &b : children[0]->GetColumnBindings()) {
+	// 	std::cout << b.ToString() << std::endl;
+	// }
+	// std::cout << "Left bindings AFTER applying projection map: " << std::endl;
+	// for (auto &b : left_bindings) {
+	// 	std::cout << b.ToString() << std::endl;
+	// }
+	// std::cout << "Right bindings BEFORE applying projection map: " << std::endl;
+	// for (auto &b : children[1]->GetColumnBindings()) {
+	// 	std::cout << b.ToString() << std::endl;
+	// }
+	// std::cout << "Right bindings AFTER applying projection map: " << std::endl;
+	// for (auto &b : right_bindings) {
+	// 	std::cout << b.ToString() << std::endl;
+	// }
 	left_bindings.insert(left_bindings.end(), right_bindings.begin(), right_bindings.end());
 	return left_bindings;
 }
