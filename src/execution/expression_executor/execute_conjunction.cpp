@@ -98,6 +98,8 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 				// iterations
 				current_sel = true_sel;
 			}
+			filter_state.tuples_sampled += tcount + fcount;
+			filter_state.tuples_filtered += tcount;
 		}
 		// adapt runtime statistics
 		state.adaptive_filter->EndFilter(filter_state);

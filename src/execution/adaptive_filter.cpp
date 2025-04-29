@@ -7,6 +7,8 @@
 
 namespace duckdb {
 
+AdaptiveFilter::BottomUDFilter
+
 AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), execute_interval(20), warmup(true) {
 	auto &conj_expr = expr.Cast<BoundConjunctionExpression>();
 	D_ASSERT(conj_expr.children.size() > 1);
@@ -20,6 +22,8 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 		}
 	}
 	right_random_border = 100 * (conj_expr.children.size() - 1);
+	tuples_filtered = 0;
+	tuples_sampled = 0;
 }
 
 AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters)
@@ -30,6 +34,8 @@ AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters)
 		swap_likeliness.push_back(100);
 	}
 	right_random_border = 100 * (table_filters.filters.size() - 1);
+	tuples_filtered = 0;
+	tuples_sampled = 0;
 }
 
 AdaptiveFilterState AdaptiveFilter::BeginFilter() const {
@@ -47,7 +53,17 @@ void AdaptiveFilter::EndFilter(AdaptiveFilterState state) {
 		return;
 	}
 	auto end_time = high_resolution_clock::now();
+	tuples_sampled += state.tuples_sampled;
+	tuples_filtered += state.tuples_filtered;
 	AdaptRuntimeStatistics(duration_cast<duration<double>>(end_time - state.start_time).count());
+}
+
+double AdaptiveFilter::getSampledCost() {
+	return runtime_sum / tuples_sampled;
+}
+
+double AdaptiveFilter::getSampledSelectivity() {
+	return tuples_filtered / tuples_sampled;
 }
 
 void AdaptiveFilter::AdaptRuntimeStatistics(double duration) {

@@ -17,6 +17,8 @@ namespace duckdb {
 
 struct AdaptiveFilterState {
 	time_point<high_resolution_clock> start_time;
+	uint32_t tuples_sampled;
+	uint32_t tuples_filtered;
 };
 
 class AdaptiveFilter {
@@ -26,11 +28,15 @@ public:
 
 	vector<optional_idx> permutation;
 
+
 public:
 	void AdaptRuntimeStatistics(double duration);
 
 	AdaptiveFilterState BeginFilter() const;
 	void EndFilter(AdaptiveFilterState state);
+
+	double getSampledCost(void);
+	double getSampledSelectivity(void);
 
 private:
 	bool disable_permutations = false;
@@ -41,6 +47,8 @@ private:
 	idx_t right_random_border = 0;
 	idx_t observe_interval = 0;
 	idx_t execute_interval = 0;
+	uint32_t tuples_sampled = 0;
+	uint32_t tuples_filtered = 0;
 	double runtime_sum = 0;
 	double prev_mean = 0;
 	bool observe = false;
