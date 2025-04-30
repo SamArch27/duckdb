@@ -7,8 +7,6 @@
 
 namespace duckdb {
 
-AdaptiveFilter::BottomUDFilter
-
 AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), execute_interval(20), warmup(true) {
 	auto &conj_expr = expr.Cast<BoundConjunctionExpression>();
 	D_ASSERT(conj_expr.children.size() > 1);

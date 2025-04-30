@@ -301,7 +301,51 @@ unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalO
 		expressions.push_back(std::move(f->filter));
 	}
 
-	return AddLogicalFilter(std::move(op), std::move(expressions));
+	auto filter_op = AddLogicalFilter(std::move(op), std::move(expressions));
+
+	auto logical_filter = reinterpret_cast<LogicalFilter*>(filter_op.get());
+	bool has_udf = false;
+	for (auto &expr : logical_filter->expressions) {
+		// TODO: Check if contains a UDF!
+		if (expr->ContainsUDF()) {
+			has_udf = true;
+			break;
+		}
+	}
+
+	// If this filter has a UDF, we need to check if there are UDF filters below it.
+	if (has_udf) {
+		bool has_udf_filter_below = HasUDFFilterInSubtree(filter_op->children[0].get());
+
+		if (!has_udf_filter_below) {
+			logical_filter->is_lowest_udf_filter = true;
+		}
+	}
+
+	return filter_op;
+}
+
+bool FilterPushdown::HasUDFFilterInSubtree(LogicalOperator* op) {
+	if (!op) {
+		return false;
+	}
+
+	if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+		auto filter = reinterpret_cast<LogicalFilter*>(op);
+		for (auto &expr : filter->expressions) {
+			if (expr->ContainsUDF()) {
+				return true;
+			}
+		}
+	}
+
+	for (auto &child : op->children) {
+		if (HasUDFFilterInSubtree(child.get())) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 unique_ptr<LogicalOperator> FilterPushdown::FinishPushdown(unique_ptr<LogicalOperator> op) {

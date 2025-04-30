@@ -28,6 +28,18 @@ public:
 
 	vector<optional_idx> permutation;
 
+	struct BottomUDFFilter {
+		bool is_lowest = false;
+	};
+
+	BottomUDFFilter bottom_filter;
+	void SetLowestFilter(bool is_lowest) {
+		bottom_filter.is_lowest = is_lowest;
+	}
+
+	bool IsLowestFilter(void) const {
+		return bottom_filter.is_lowest;
+	}
 
 public:
 	void AdaptRuntimeStatistics(double duration);
