@@ -123,10 +123,6 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	// attach the project as a child of the parent
 	last_filter->children[0] = std::move(project);
 
-	// // resolve the columns again
-	// std::cout << "REATTACHED AND REPRINTING!" << std::endl;
-	// resolver.VisitOperator(*root_filter);
-
 	// grab the binding for the "best" column
 	auto &new_project = last_filter->children[0];
 	auto project_bindings = new_project->GetColumnBindings();
@@ -160,6 +156,11 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	// Now we need to update the bindings for each node in the stream
 	for (int i = 0; i < stream.size(); ++i) {
 		auto &op = stream[i];
+
+		if (!op->HasProjectionMap()) {
+			continue;
+		}
+
 		std::cout << "Op is: " << std::endl;
 		std::cout << op->ToString() << std::endl;
 
@@ -167,13 +168,6 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		std::cout << "Bindings are: " << std::endl;
 		for (auto &b : op->GetColumnBindings()) {
 			std::cout << b.ToString() << std::endl;
-		}
-		auto it = std::find(bindings.begin(), bindings.end(), project_binding);
-
-		// if the binding for the "best" is found then we're done
-		if (it != bindings.end()) {
-			std::cout << "Found project in bindings! Continuing!" << std::endl;
-			continue;
 		}
 
 		switch (op->type) {
@@ -203,6 +197,15 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 			}
 			// binding is from the LHS
 			if (left_it != left_bindings.end()) {
+
+				// it will inherit the binding automatically, continue
+				auto &map = join.left_projection_map;
+				if (map.empty()) {
+					std::cout << "Join doesn't have left projection map. Continuing!" << std::endl;
+					continue;
+				}
+
+				// otherwise insert it into the projection map
 				auto offset = std::distance(left_bindings.begin(), left_it);
 				std::cout << "Adding offset: " << offset << " to left projection map!" << std::endl;
 				std::cout << "Binding at offset is: " << left_bindings[offset].ToString() << std::endl;
@@ -211,10 +214,25 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 						++b;
 					}
 				}
-				join.left_projection_map.push_back(offset);
+				int map_index = -1;
+				for (int i = map.size() - 1; i >= 0; --i) {
+					if (left_bindings[map[i]].table_index == project_binding.table_index) {
+						map_index = i;
+						break;
+					}
+				}
+				map.insert(map.begin() + map_index + 1, offset);
 			}
 			// binding is from the RHS
 			else {
+
+				// it will inherit the binding automatically, continue
+				auto &map = join.right_projection_map;
+				if (map.empty()) {
+					std::cout << "Join doesn't have right projection map. Continuing!" << std::endl;
+					continue;
+				}
+
 				auto offset = std::distance(right_bindings.begin(), right_it);
 				std::cout << "Adding offset: " << offset << " to right projection map!" << std::endl;
 				std::cout << "Binding at offset is: " << right_bindings[offset].ToString() << std::endl;
@@ -223,7 +241,14 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 						++b;
 					}
 				}
-				join.right_projection_map.push_back(offset);
+				int map_index = -1;
+				for (int i = map.size() - 1; i >= 0; --i) {
+					if (right_bindings[map[i]].table_index == project_binding.table_index) {
+						map_index = i;
+						break;
+					}
+				}
+				map.insert(map.begin() + map_index + 1, offset);
 			}
 
 			std::cout << "Left projection map after: " << std::endl;
@@ -239,32 +264,43 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		case LogicalOperatorType::LOGICAL_FILTER: {
 			std::cout << "Filter!" << std::endl;
 			auto &filter = op->Cast<LogicalFilter>();
-			if (!filter.projection_map.empty()) {
-				std::cout << "Projection map before: " << std::endl;
-				for (auto &idx : filter.projection_map) {
-					std::cout << idx << std::endl;
-				}
 
-				auto child_bindings = filter.children[0]->GetColumnBindings();
-				auto it = std::find(child_bindings.begin(), child_bindings.end(), project_binding);
-				if (it == child_bindings.end()) {
-					std::cout << "Didn't find binding in filter child!" << std::endl;
-					throw NotImplementedException("Should have binding for child of filter but don't!");
-				}
-				auto offset = std::distance(child_bindings.begin(), it);
-				std::cout << "Adding offset: " << offset << " to projection map!" << std::endl;
-				std::cout << "Binding at offset is: " << child_bindings[offset].ToString() << std::endl;
-				for (auto &b : filter.projection_map) {
-					if (b >= offset) {
-						++b;
-					}
-				}
-				filter.projection_map.push_back(offset);
+			auto &map = filter.projection_map;
+			if (map.empty()) {
+				std::cout << "Filter doesn't have projection map. Continuing!" << std::endl;
+				continue;
+			}
+			std::cout << "Projection map before: " << std::endl;
+			for (auto &idx : filter.projection_map) {
+				std::cout << idx << std::endl;
+			}
 
-				std::cout << "Projection map after: " << std::endl;
-				for (auto &idx : filter.projection_map) {
-					std::cout << idx << std::endl;
+			auto child_bindings = filter.children[0]->GetColumnBindings();
+			auto it = std::find(child_bindings.begin(), child_bindings.end(), project_binding);
+			if (it == child_bindings.end()) {
+				std::cout << "Didn't find binding in filter child!" << std::endl;
+				throw NotImplementedException("Should have binding for child of filter but don't!");
+			}
+			auto offset = std::distance(child_bindings.begin(), it);
+			std::cout << "Adding offset: " << offset << " to projection map!" << std::endl;
+			std::cout << "Binding at offset is: " << child_bindings[offset].ToString() << std::endl;
+			for (auto &b : filter.projection_map) {
+				if (b >= offset) {
+					++b;
 				}
+			}
+			int map_index = -1;
+			for (int i = map.size() - 1; i >= 0; --i) {
+				if (child_bindings[map[i]].table_index == project_binding.table_index) {
+					map_index = i;
+					break;
+				}
+			}
+			map.insert(map.begin() + map_index + 1, offset);
+
+			std::cout << "Projection map after: " << std::endl;
+			for (auto &idx : filter.projection_map) {
+				std::cout << idx << std::endl;
 			}
 			break;
 		}
@@ -278,10 +314,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	}
 
 	// // resolve the columns again
-	// resolver.VisitOperator(*root_filter);
-
-	// TODO:
-	// 1. Rewrite each of the UDF filters to the form: (best != k OR udf(...))
+	resolver.VisitOperator(*root_filter);
 
 	// Next TODO:
 	// 2. Compute cost formulas for each plan
