@@ -1,6 +1,5 @@
 #include "duckdb/optimizer/adaptive_udf.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
-#include "duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
@@ -8,11 +7,12 @@
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/logical_operator_visitor.hpp"
+#include "duckdb/planner/binder.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/queue.hpp"
 #include "duckdb/common/unordered_set.hpp"
 #include "duckdb/common/unordered_map.hpp"
-#include "duckdb/planner/binder.hpp"
 #include "duckdb/execution/column_binding_resolver.hpp"
 #include "duckdb/execution/binding_rewriter.hpp"
 #include <iostream>
@@ -90,10 +90,10 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	}
 
 	// stick a project between this filter and the lowest UDF filter
-	auto *last_filter = stream.back();
+	auto &last_filter = stream.back()->Cast<LogicalFilter>();
 
 	// re-project the expressions below
-	auto &node = last_filter->children[0];
+	auto &node = last_filter.children[0];
 	auto bindings = node->GetColumnBindings();
 	node->ResolveOperatorTypes();
 	auto types = node->types;
@@ -113,8 +113,8 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	// make the projection node
 	auto project = make_uniq<LogicalProjection>(new_tbl_idx, std::move(project_expressions));
 	// propagate the cardinality of the node below
-	if (last_filter->children[0]->has_estimated_cardinality) {
-		project->SetEstimatedCardinality(last_filter->children[0]->estimated_cardinality);
+	if (last_filter.children[0]->has_estimated_cardinality) {
+		project->SetEstimatedCardinality(last_filter.children[0]->estimated_cardinality);
 	}
 
 	std::cout << "ADDED PROJECTION!" << std::endl;
@@ -126,37 +126,26 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	}
 
 	// detach the filter
-	std::cout << "A" << std::endl;
-	auto detached_filter = std::move(last_filter->children[0]);
-	std::cout << "B" << std::endl;
+	auto detached_filter = std::move(last_filter.children[0]);
 
 	// remove the child
-	last_filter->children.clear();
-	std::cout << "C" << std::endl;
+	last_filter.children.clear();
 
-	// add a dummy scan as a child
-	last_filter->AddChild(make_uniq<LogicalDummyScan>(optimizer.binder.GenerateTableIndex()));
-	std::cout << "D" << std::endl;
-
-	// rewriting the old bindings above to use the new binding
+	// rewrite the old bindings above to use the new binding
 	BindingRewriter rewriter(old_new_bindings);
-	rewriter.VisitOperator(*root_filter);
-	std::cout << "E" << std::endl;
-
-	// remove the dummy scan child
-	last_filter->children.clear();
-	std::cout << "F" << std::endl;
+	for (auto &op : stream) {
+		// rewrite the expressions
+		rewriter.VisitOperatorExpressions(*op);
+	}
 
 	// reattach the node below as a child of the project
 	project->AddChild(std::move(detached_filter));
-	std::cout << "G" << std::endl;
 
 	// attach the project as a child of the parent
-	last_filter->AddChild(std::move(project));
-	std::cout << "H" << std::endl;
+	last_filter.AddChild(std::move(project));
 
 	// grab the binding for the "best" column
-	auto &new_project = last_filter->children[0];
+	auto &new_project = last_filter.children[0];
 	auto project_bindings = new_project->GetColumnBindings();
 	new_project->ResolveOperatorTypes();
 	auto project_types = new_project->types;
@@ -247,14 +236,10 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 						++b;
 					}
 				}
-				int map_index = -1;
-				for (int i = map.size() - 1; i >= 0; --i) {
-					if (left_bindings[map[i]].table_index == project_binding.table_index) {
-						map_index = i;
-						break;
-					}
+
+				if (i != stream.size() - 1) {
+					map.push_back(offset);
 				}
-				map.insert(map.begin() + map_index + 1, offset);
 			}
 			// binding is from the RHS
 			else {
@@ -274,32 +259,9 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 						++b;
 					}
 				}
-				int map_index = -1;
-				for (int i = map.size() - 1; i >= 0; --i) {
-					if (right_bindings[map[i]].table_index == project_binding.table_index) {
-						map_index = i;
-						break;
-					}
-				}
-				map.insert(map.begin() + map_index + 1, offset);
-			}
 
-			// Update the offset of bound column references in the joins themselves
-			if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-				auto &comparison_join = op->Cast<LogicalComparisonJoin>();
-				for (auto &cond : comparison_join.conditions) {
-					if (cond.left->type == ExpressionType::BOUND_REF) {
-						auto &left = cond.left->Cast<BoundReferenceExpression>();
-						if (left.index >= offset) {
-							++left.index;
-						}
-					}
-					if (cond.right->type == ExpressionType::BOUND_REF) {
-						auto &right = cond.right->Cast<BoundReferenceExpression>();
-						if (right.index >= offset) {
-							++right.index;
-						}
-					}
+				if (i != stream.size() - 1) {
+					map.push_back(offset);
 				}
 			}
 
@@ -341,14 +303,10 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 					++b;
 				}
 			}
-			int map_index = -1;
-			for (int i = map.size() - 1; i >= 0; --i) {
-				if (child_bindings[map[i]].table_index == project_binding.table_index) {
-					map_index = i;
-					break;
-				}
+
+			if (i != stream.size() - 1) {
+				map.push_back(offset);
 			}
-			map.insert(map.begin() + map_index + 1, offset);
 
 			std::cout << "Projection map after: " << std::endl;
 			for (auto &idx : filter.projection_map) {
@@ -366,20 +324,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	}
 	std::cout << "OUT!" << std::endl;
 
-	bindings = root_filter->GetColumnBindings();
-	root_filter->ResolveOperatorTypes();
-	types = root_filter->types;
-	project_expressions.clear();
-	D_ASSERT(bindings.size() == types.size());
-	new_tbl_idx = optimizer.binder.GenerateTableIndex();
-	tbl_idx = bindings[0].table_index;
-	for (idx_t col_idx = 0; col_idx < bindings.size(); col_idx++) {
-		D_ASSERT(tbl_idx == bindings[col_idx].table_index);
-		project_expressions.emplace_back(make_uniq<BoundColumnRefExpression>(types[col_idx], bindings[col_idx]));
-	}
-	project = make_uniq<LogicalProjection>(new_tbl_idx, std::move(project_expressions));
-	project->AddChild(std::move(root_filter));
-	return project;
+	return root_filter;
 	// Next TODO:
 	// 2. Compute cost formulas for each plan
 
