@@ -1,5 +1,6 @@
 #include "duckdb/optimizer/adaptive_udf.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/planner/operator/logical_dummy_scan.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
@@ -13,7 +14,7 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/execution/column_binding_resolver.hpp"
-
+#include "duckdb/execution/binding_rewriter.hpp"
 #include <iostream>
 
 namespace duckdb {
@@ -101,9 +102,11 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	D_ASSERT(bindings.size() == types.size());
 	idx_t new_tbl_idx = optimizer.binder.GenerateTableIndex();
 	idx_t tbl_idx = bindings[0].table_index;
+	vector<pair<ColumnBinding, ColumnBinding>> old_new_bindings;
 	for (idx_t col_idx = 0; col_idx < bindings.size(); col_idx++) {
 		D_ASSERT(tbl_idx == bindings[col_idx].table_index);
 		project_expressions.emplace_back(make_uniq<BoundColumnRefExpression>(types[col_idx], bindings[col_idx]));
+		old_new_bindings.emplace_back(make_pair(bindings[col_idx], ColumnBinding(new_tbl_idx, col_idx)));
 	}
 	// project a new column for "best"
 	project_expressions.emplace_back(make_uniq<BoundConstantExpression>(Value::INTEGER(42)));
@@ -116,14 +119,41 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 
 	std::cout << "ADDED PROJECTION!" << std::endl;
 	// resolve the column bindings
-	ColumnBindingResolver resolver;
-	resolver.VisitOperator(*root_filter);
 
-	// attach the node below as a child of the project
-	project->AddChild(std::move(last_filter->children[0]));
+	std::cout << "PRINTING OLD NEW BINDINGS!" << std::endl;
+	for (auto &[old_b, new_b] : old_new_bindings) {
+		std::cout << old_b.ToString() << " -> " << new_b.ToString() << std::endl;
+	}
+
+	// detach the filter
+	std::cout << "A" << std::endl;
+	auto detached_filter = std::move(last_filter->children[0]);
+	std::cout << "B" << std::endl;
+
+	// remove the child
+	last_filter->children.clear();
+	std::cout << "C" << std::endl;
+
+	// add a dummy scan as a child
+	last_filter->AddChild(make_uniq<LogicalDummyScan>(optimizer.binder.GenerateTableIndex()));
+	std::cout << "D" << std::endl;
+
+	// rewriting the old bindings above to use the new binding
+	BindingRewriter rewriter(old_new_bindings);
+	rewriter.VisitOperator(*root_filter);
+	std::cout << "E" << std::endl;
+
+	// remove the dummy scan child
+	last_filter->children.clear();
+	std::cout << "F" << std::endl;
+
+	// reattach the node below as a child of the project
+	project->AddChild(std::move(detached_filter));
+	std::cout << "G" << std::endl;
 
 	// attach the project as a child of the parent
-	last_filter->children[0] = std::move(project);
+	last_filter->AddChild(std::move(project));
+	std::cout << "H" << std::endl;
 
 	// grab the binding for the "best" column
 	auto &new_project = last_filter->children[0];
@@ -334,18 +364,28 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 			std::cout << b.ToString() << std::endl;
 		}
 	}
+	std::cout << "OUT!" << std::endl;
 
-	// // resolve the columns again
-	resolver.VisitOperator(*root_filter);
-
+	bindings = root_filter->GetColumnBindings();
+	root_filter->ResolveOperatorTypes();
+	types = root_filter->types;
+	project_expressions.clear();
+	D_ASSERT(bindings.size() == types.size());
+	new_tbl_idx = optimizer.binder.GenerateTableIndex();
+	tbl_idx = bindings[0].table_index;
+	for (idx_t col_idx = 0; col_idx < bindings.size(); col_idx++) {
+		D_ASSERT(tbl_idx == bindings[col_idx].table_index);
+		project_expressions.emplace_back(make_uniq<BoundColumnRefExpression>(types[col_idx], bindings[col_idx]));
+	}
+	project = make_uniq<LogicalProjection>(new_tbl_idx, std::move(project_expressions));
+	project->AddChild(std::move(root_filter));
+	return project;
 	// Next TODO:
 	// 2. Compute cost formulas for each plan
 
 	// After Kyle's part TODO:
 	// 3. Make the projection plug in the batch cost/selectivity from the lowest filter when computing the
 	// "best" value
-
-	return root_filter;
 } // namespace duckdb
 
 unique_ptr<LogicalOperator> AdaptiveUDF::Rewrite(unique_ptr<LogicalOperator> op) {
