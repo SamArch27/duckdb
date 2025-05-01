@@ -1,9 +1,11 @@
 #include "duckdb/optimizer/adaptive_udf.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/operator/logical_join.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/common/enums/expression_type.hpp"
 #include "duckdb/common/queue.hpp"
@@ -175,6 +177,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
 		case LogicalOperatorType::LOGICAL_DELIM_JOIN:
 		case LogicalOperatorType::LOGICAL_ASOF_JOIN: {
+			ptrdiff_t offset = -1;
 			std::cout << "Join!" << std::endl;
 			auto &join = op->Cast<LogicalJoin>();
 
@@ -206,7 +209,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 				}
 
 				// otherwise insert it into the projection map
-				auto offset = std::distance(left_bindings.begin(), left_it);
+				offset = std::distance(left_bindings.begin(), left_it);
 				std::cout << "Adding offset: " << offset << " to left projection map!" << std::endl;
 				std::cout << "Binding at offset is: " << left_bindings[offset].ToString() << std::endl;
 				for (auto &b : join.left_projection_map) {
@@ -233,7 +236,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 					continue;
 				}
 
-				auto offset = std::distance(right_bindings.begin(), right_it);
+				offset = std::distance(right_bindings.begin(), right_it);
 				std::cout << "Adding offset: " << offset << " to right projection map!" << std::endl;
 				std::cout << "Binding at offset is: " << right_bindings[offset].ToString() << std::endl;
 				for (auto &b : join.right_projection_map) {
@@ -249,6 +252,25 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 					}
 				}
 				map.insert(map.begin() + map_index + 1, offset);
+			}
+
+			// Update the offset of bound column references in the joins themselves
+			if (op->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+				auto &comparison_join = op->Cast<LogicalComparisonJoin>();
+				for (auto &cond : comparison_join.conditions) {
+					if (cond.left->type == ExpressionType::BOUND_REF) {
+						auto &left = cond.left->Cast<BoundReferenceExpression>();
+						if (left.index >= offset) {
+							++left.index;
+						}
+					}
+					if (cond.right->type == ExpressionType::BOUND_REF) {
+						auto &right = cond.right->Cast<BoundReferenceExpression>();
+						if (right.index >= offset) {
+							++right.index;
+						}
+					}
+				}
 			}
 
 			std::cout << "Left projection map after: " << std::endl;
