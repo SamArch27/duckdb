@@ -1,6 +1,5 @@
 #include "duckdb/execution/binding_rewriter.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
-#include <iostream>
 
 namespace duckdb {
 
@@ -12,12 +11,10 @@ unique_ptr<Expression> BindingRewriter::VisitReplace(BoundColumnRefExpression &e
 
 	for (auto &[old_b, new_b] : old_new_bindings) {
 		if (old_b == expr.binding) {
-			std::cout << "Rewrote binding in BindingRewriter!!" << std::endl;
 			expr.binding = new_b;
 			break;
 		}
 	}
-
 	return std::move(*expr_ptr);
 }
 

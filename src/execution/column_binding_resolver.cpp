@@ -17,13 +17,6 @@ ColumnBindingResolver::ColumnBindingResolver(bool verify_only) : verify_only(ver
 }
 
 void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
-	std::cout << "Op: \n" << std::endl;
-	std::cout << op.ToString() << std::endl;
-	std::cout << "Bindings: \n" << std::endl;
-
-	for (auto &binding : op.GetColumnBindings()) {
-		std::cout << binding.ToString() << std::endl;
-	}
 
 	switch (op.type) {
 	case LogicalOperatorType::LOGICAL_ASOF_JOIN:

@@ -15,7 +15,6 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/execution/column_binding_resolver.hpp"
 #include "duckdb/execution/binding_rewriter.hpp"
-#include <iostream>
 
 namespace duckdb {
 
@@ -82,10 +81,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
 			break;
 		default:
-			std::cout << "Error: Unsupported construct for UDF filter pushing " << std::endl;
-			std::cout << "Operating is: \n" << std::endl;
-			std::cout << op->ToString() << std::endl;
-			D_ASSERT(false);
+			throw NotImplementedException("Unsupported operator in stream!");
 		}
 	}
 
@@ -117,14 +113,6 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		project->SetEstimatedCardinality(last_filter.children[0]->estimated_cardinality);
 	}
 
-	std::cout << "ADDED PROJECTION!" << std::endl;
-	// resolve the column bindings
-
-	std::cout << "PRINTING OLD NEW BINDINGS!" << std::endl;
-	for (auto &[old_b, new_b] : old_new_bindings) {
-		std::cout << old_b.ToString() << " -> " << new_b.ToString() << std::endl;
-	}
-
 	// detach the filter
 	auto detached_filter = std::move(last_filter.children[0]);
 
@@ -152,6 +140,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	auto project_binding = project_bindings.back();
 	auto project_reference = make_uniq<BoundColumnRefExpression>("best", project_types.back(), project_bindings.back());
 
+	// consider filters lowest to highest
 	std::reverse(stream.begin(), stream.end());
 
 	// rewrite any UDF filter in the stream to be of the form (best != k OR udf(...))
@@ -182,39 +171,18 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 			continue;
 		}
 
-		std::cout << "Op is: " << std::endl;
-		std::cout << op->ToString() << std::endl;
-
-		auto bindings = op->GetColumnBindings();
-		std::cout << "Bindings are: " << std::endl;
-		for (auto &b : op->GetColumnBindings()) {
-			std::cout << b.ToString() << std::endl;
-		}
-
 		switch (op->type) {
 		case LogicalOperatorType::LOGICAL_ANY_JOIN:
 		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
 		case LogicalOperatorType::LOGICAL_DELIM_JOIN:
 		case LogicalOperatorType::LOGICAL_ASOF_JOIN: {
-			ptrdiff_t offset = -1;
-			std::cout << "Join!" << std::endl;
 			auto &join = op->Cast<LogicalJoin>();
-
-			std::cout << "Left projection map before: " << std::endl;
-			for (auto &idx : join.left_projection_map) {
-				std::cout << idx << std::endl;
-			}
-			std::cout << "Right projection map before: " << std::endl;
-			for (auto &idx : join.right_projection_map) {
-				std::cout << idx << std::endl;
-			}
 
 			auto left_bindings = join.children[0]->GetColumnBindings();
 			auto right_bindings = join.children[1]->GetColumnBindings();
 			auto left_it = std::find(left_bindings.begin(), left_bindings.end(), project_binding);
 			auto right_it = std::find(right_bindings.begin(), right_bindings.end(), project_binding);
 			if (left_it == left_bindings.end() && right_it == right_bindings.end()) {
-				std::cout << "Didn't find binding in either child!" << std::endl;
 				throw NotImplementedException("Should have binding for join but don't!");
 			}
 			// binding is from the LHS
@@ -223,20 +191,18 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 				// it will inherit the binding automatically, continue
 				auto &map = join.left_projection_map;
 				if (map.empty()) {
-					std::cout << "Join doesn't have left projection map. Continuing!" << std::endl;
 					continue;
 				}
 
 				// otherwise insert it into the projection map
-				offset = std::distance(left_bindings.begin(), left_it);
-				std::cout << "Adding offset: " << offset << " to left projection map!" << std::endl;
-				std::cout << "Binding at offset is: " << left_bindings[offset].ToString() << std::endl;
+				auto offset = std::distance(left_bindings.begin(), left_it);
 				for (auto &b : join.left_projection_map) {
 					if (b >= offset) {
 						++b;
 					}
 				}
 
+				// add the projection for the next operator
 				if (i != stream.size() - 1) {
 					map.push_back(offset);
 				}
@@ -247,82 +213,58 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 				// it will inherit the binding automatically, continue
 				auto &map = join.right_projection_map;
 				if (map.empty()) {
-					std::cout << "Join doesn't have right projection map. Continuing!" << std::endl;
 					continue;
 				}
 
-				offset = std::distance(right_bindings.begin(), right_it);
-				std::cout << "Adding offset: " << offset << " to right projection map!" << std::endl;
-				std::cout << "Binding at offset is: " << right_bindings[offset].ToString() << std::endl;
+				// otherwise insert it into the projection map
+				auto offset = std::distance(right_bindings.begin(), right_it);
 				for (auto &b : join.right_projection_map) {
 					if (b >= offset) {
 						++b;
 					}
 				}
 
+				// add the projection for the next operator
 				if (i != stream.size() - 1) {
 					map.push_back(offset);
 				}
 			}
-
-			std::cout << "Left projection map after: " << std::endl;
-			for (auto &idx : join.left_projection_map) {
-				std::cout << idx << std::endl;
-			}
-			std::cout << "Right projection map after: " << std::endl;
-			for (auto &idx : join.right_projection_map) {
-				std::cout << idx << std::endl;
-			}
 			break;
 		}
 		case LogicalOperatorType::LOGICAL_FILTER: {
-			std::cout << "Filter!" << std::endl;
 			auto &filter = op->Cast<LogicalFilter>();
 
+			// it will inherit the binding automatically, continue
 			auto &map = filter.projection_map;
 			if (map.empty()) {
-				std::cout << "Filter doesn't have projection map. Continuing!" << std::endl;
 				continue;
-			}
-			std::cout << "Projection map before: " << std::endl;
-			for (auto &idx : filter.projection_map) {
-				std::cout << idx << std::endl;
 			}
 
 			auto child_bindings = filter.children[0]->GetColumnBindings();
 			auto it = std::find(child_bindings.begin(), child_bindings.end(), project_binding);
 			if (it == child_bindings.end()) {
-				std::cout << "Didn't find binding in filter child!" << std::endl;
 				throw NotImplementedException("Should have binding for child of filter but don't!");
 			}
+
+			// otherwise insert it into the projection map
 			auto offset = std::distance(child_bindings.begin(), it);
-			std::cout << "Adding offset: " << offset << " to projection map!" << std::endl;
-			std::cout << "Binding at offset is: " << child_bindings[offset].ToString() << std::endl;
 			for (auto &b : filter.projection_map) {
 				if (b >= offset) {
 					++b;
 				}
 			}
 
+			// add the projection for the next operator
 			if (i != stream.size() - 1) {
 				map.push_back(offset);
 			}
 
-			std::cout << "Projection map after: " << std::endl;
-			for (auto &idx : filter.projection_map) {
-				std::cout << idx << std::endl;
-			}
 			break;
 		}
 		default:
 			throw NotImplementedException("Should have binding but don't for %s", EnumUtil::ToString(op->type));
 		}
-		std::cout << "PRINTING UPDATED BINDINGS" << std::endl;
-		for (auto &b : op->GetColumnBindings()) {
-			std::cout << b.ToString() << std::endl;
-		}
 	}
-	std::cout << "OUT!" << std::endl;
 
 	return root_filter;
 	// Next TODO:
