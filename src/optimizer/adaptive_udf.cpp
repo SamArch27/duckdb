@@ -15,10 +15,11 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/execution/column_binding_resolver.hpp"
 #include "duckdb/execution/binding_rewriter.hpp"
+#include "duckdb/main/config.hpp"
 
 namespace duckdb {
 
-AdaptiveUDF::AdaptiveUDF(Optimizer &optimizer) : optimizer(optimizer) {
+AdaptiveUDF::AdaptiveUDF(Optimizer &optimizer, int64_t best) : optimizer(optimizer), best(best) {
 }
 
 unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOperator> root_filter) {
@@ -45,6 +46,9 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 							D_ASSERT(child_filter.expressions.size() == 1);
 							if (Expression::Equals(filter.expressions[0], child_filter.expressions[0])) {
 								match = curr;
+								if (best != 42) {
+									child_filter.expressions.clear();
+								}
 								break;
 							}
 						}
@@ -105,7 +109,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		old_new_bindings.emplace_back(make_pair(bindings[col_idx], ColumnBinding(new_tbl_idx, col_idx)));
 	}
 	// project a new column for "best"
-	project_expressions.emplace_back(make_uniq<BoundConstantExpression>(Value::INTEGER(42)));
+	project_expressions.emplace_back(make_uniq<BoundConstantExpression>(Value::INTEGER(best)));
 	// make the projection node
 	auto project = make_uniq<LogicalProjection>(new_tbl_idx, std::move(project_expressions));
 	// propagate the cardinality of the node below
