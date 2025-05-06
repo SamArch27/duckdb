@@ -32,9 +32,13 @@ protected:
 	//! Automatically calls the Visit method for LogicalOperator children of the current operator. Can be overloaded to
 	//! change this behavior.
 	void VisitOperatorChildren(LogicalOperator &op);
+
+public:
 	//! Automatically calls the Visit method for Expression children of the current operator. Can be overloaded to
 	//! change this behavior.
 	void VisitOperatorExpressions(LogicalOperator &op);
+
+protected:
 	//! Alternatives for VisitOperatorChildren for operators that have a projection map
 	void VisitOperatorWithProjectionMapChildren(LogicalOperator &op);
 	void VisitChildOfOperatorWithProjectionMap(LogicalOperator &child, vector<idx_t> &projection_map);

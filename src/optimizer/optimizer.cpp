@@ -299,7 +299,7 @@ void Optimizer::RunBuiltInOptimizers() {
 
 	// perform UDF plan rewriting (adaptivity)
 	RunOptimizer(OptimizerType::ADAPTIVE_UDF, [&]() {
-		AdaptiveUDF adaptive_udf(*this);
+		AdaptiveUDF adaptive_udf(*this, DBConfig::GetConfig(context).options.best_udf_placement);
 		plan = adaptive_udf.Rewrite(std::move(plan));
 	});
 	std::cout << "AFTER UDF PLAN REWRITING:\n" << std::endl;

@@ -1370,6 +1370,23 @@ Value ThreadsSetting::GetSetting(const ClientContext &context) {
 }
 
 //===----------------------------------------------------------------------===//
+// Best UDF Placement
+//===----------------------------------------------------------------------===//
+void BestUDFPlacementSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {
+	auto new_val = input.GetValue<int64_t>();
+	config.options.best_udf_placement = new_val;
+}
+
+void BestUDFPlacementSetting::ResetGlobal(DatabaseInstance *db, DBConfig &config) {
+	config.options.best_udf_placement = 42;
+}
+
+Value BestUDFPlacementSetting::GetSetting(const ClientContext &context) {
+	auto &config = DBConfig::GetConfig(context);
+	return Value::BIGINT(NumericCast<int64_t>(config.options.best_udf_placement));
+}
+
+//===----------------------------------------------------------------------===//
 // Username
 //===----------------------------------------------------------------------===//
 void UsernameSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {

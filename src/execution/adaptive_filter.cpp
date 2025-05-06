@@ -10,6 +10,9 @@ namespace duckdb {
 AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), execute_interval(20), warmup(true) {
 	auto &conj_expr = expr.Cast<BoundConjunctionExpression>();
 	D_ASSERT(conj_expr.children.size() > 1);
+	if (conj_expr.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
+		disable_permutations = true;
+	}
 	for (idx_t idx = 0; idx < conj_expr.children.size(); idx++) {
 		permutation.push_back(idx);
 		if (conj_expr.children[idx]->CanThrow()) {

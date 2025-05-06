@@ -1,5 +1,4 @@
 #include "duckdb/planner/operator/logical_join.hpp"
-
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 

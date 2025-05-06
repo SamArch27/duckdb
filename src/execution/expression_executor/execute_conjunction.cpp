@@ -2,7 +2,6 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/execution/adaptive_filter.hpp"
-
 #include <random>
 
 namespace duckdb {
@@ -133,9 +132,12 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 					if (true_sel) {
 						// tuples passed, move them into the actual result vector
 						for (idx_t i = 0; i < tcount; i++) {
-							true_sel->set_index(result_count++, temp_true->get_index(i));
+							true_sel->set_index(result_count++, temp_true->get_index(i));}
+				}
+				if (tcount == current_count) {
+					break;
 						}
-					}
+
 					// now move on to check only the non-passing tuples
 					current_count -= tcount;
 					current_sel = false_sel;

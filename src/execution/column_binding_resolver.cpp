@@ -17,6 +17,7 @@ ColumnBindingResolver::ColumnBindingResolver(bool verify_only) : verify_only(ver
 }
 
 void ColumnBindingResolver::VisitOperator(LogicalOperator &op) {
+
 	switch (op.type) {
 	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {

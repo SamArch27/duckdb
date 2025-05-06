@@ -1185,6 +1185,16 @@ struct ThreadsSetting {
 	static Value GetSetting(const ClientContext &context);
 };
 
+struct BestUDFPlacementSetting {
+	using RETURN_TYPE = int64_t;
+	static constexpr const char *Name = "best";
+	static constexpr const char *Description = "The place in the query plan to evaluate the UDF predicate.";
+	static constexpr const char *InputType = "BIGINT";
+	static void SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &parameter);
+	static void ResetGlobal(DatabaseInstance *db, DBConfig &config);
+	static Value GetSetting(const ClientContext &context);
+};
+
 struct UsernameSetting {
 	using RETURN_TYPE = string;
 	static constexpr const char *Name = "username";

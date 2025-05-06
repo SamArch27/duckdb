@@ -12,6 +12,7 @@ add_library_unity(
   aggregate_hashtable.cpp
   base_aggregate_hashtable.cpp
   column_binding_resolver.cpp
+  binding_rewriter.cpp
   expression_executor.cpp
   expression_executor_state.cpp
   join_hashtable.cpp

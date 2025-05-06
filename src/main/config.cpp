@@ -167,6 +167,7 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_LOCAL(StreamingBufferSizeSetting),
     DUCKDB_GLOBAL(TempDirectorySetting),
     DUCKDB_GLOBAL(ThreadsSetting),
+    DUCKDB_GLOBAL(BestUDFPlacementSetting),
     DUCKDB_GLOBAL_ALIAS("worker_threads", ThreadsSetting),
     DUCKDB_GLOBAL(UsernameSetting),
     DUCKDB_GLOBAL_ALIAS("user", UsernameSetting),
