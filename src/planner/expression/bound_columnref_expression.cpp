@@ -35,24 +35,23 @@ bool BoundColumnRefExpression::Equals(const BaseExpression &other_p) const {
 }
 
 string BoundColumnRefExpression::GetName() const {
-	// #ifdef DEBUG
-	// 	if (DBConfigOptions::debug_print_bindings) {
-	// 		return binding.ToString();
-	// 	}
-	// #endif
-	// 	return Expression::GetName();
-	return binding.ToString();
+#ifdef DEBUG
+	if (DBConfigOptions::debug_print_bindings) {
+		return binding.ToString();
+	}
+#endif
+	return Expression::GetName();
 }
 
 string BoundColumnRefExpression::ToString() const {
-	// #ifdef DEBUG
-	// 	if (DBConfigOptions::debug_print_bindings) {
-	// 		return binding.ToString();
-	// 	}
-	// #endif
-	// 	if (!alias.empty()) {
-	// 		return alias;
-	// 	}
+#ifdef DEBUG
+	if (DBConfigOptions::debug_print_bindings) {
+		return binding.ToString();
+	}
+#endif
+	if (!alias.empty()) {
+		return alias;
+	}
 	return binding.ToString();
 }
 
