@@ -105,6 +105,11 @@ unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> 
 			if (filter) {
 				if (auto &expr = filter->filter) {
 					if (expr->ContainsUDF()) {
+						if (std::any_of(
+						        udf_expressions.begin(), udf_expressions.end(),
+						        [&](unique_ptr<Expression> &udf_expr) { return Expression::Equals(udf_expr, expr); })) {
+							continue;
+						}
 						udf_expressions.push_back(expr->Copy());
 					}
 				}
@@ -298,6 +303,10 @@ unique_ptr<LogicalOperator> FilterPushdown::AddLogicalFilter(unique_ptr<LogicalO
 unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalOperator> op) {
 	vector<unique_ptr<Expression>> expressions;
 	for (auto &f : filters) {
+		if (std::any_of(expressions.begin(), expressions.end(),
+		                [&](unique_ptr<Expression> &expr) { return Expression::Equals(expr, f->filter); })) {
+			continue;
+		}
 		expressions.push_back(std::move(f->filter));
 	}
 
