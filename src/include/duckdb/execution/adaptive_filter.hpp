@@ -27,7 +27,9 @@ public:
 	explicit AdaptiveFilter(const TableFilterSet &table_filters);
 
 	vector<optional_idx> permutation;
+	bool is_lowest_udf_filter = false;
 
+	// TODO: This is wrong! No code in header files.
 	struct BottomUDFFilter {
 		bool is_lowest = false;
 	};
@@ -40,6 +42,7 @@ public:
 	bool IsLowestFilter(void) const {
 		return bottom_filter.is_lowest;
 	}
+
 
 public:
 	void AdaptRuntimeStatistics(double duration);

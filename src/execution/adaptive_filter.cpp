@@ -22,6 +22,9 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 	right_random_border = 100 * (conj_expr.children.size() - 1);
 	tuples_filtered = 0;
 	tuples_sampled = 0;
+	if (expr.IsLowest()) {
+		is_lowest_udf_filter = true;
+	}
 }
 
 AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters)

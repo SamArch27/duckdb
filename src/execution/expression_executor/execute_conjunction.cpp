@@ -10,6 +10,7 @@ namespace duckdb {
 struct ConjunctionState : public ExpressionState {
 	ConjunctionState(const Expression &expr, ExpressionExecutorState &root) : ExpressionState(expr, root) {
 		adaptive_filter = make_uniq<AdaptiveFilter>(expr);
+		adaptive_filter->is_lowest_udf_filter = adaptive_filter->IsLowestFilter();
 	}
 	unique_ptr<AdaptiveFilter> adaptive_filter;
 };

@@ -318,7 +318,11 @@ unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalO
 		bool has_udf_filter_below = HasUDFFilterInSubtree(filter_op->children[0].get());
 
 		if (!has_udf_filter_below) {
-			logical_filter->is_lowest_udf_filter = true;
+			// We are the bottom, thus we have a special job to do! Sample and route.
+			// For every expression in this filter we need to make it know that it is the bottom.
+			for (auto &expr : logical_filter->expressions) {
+				expr->SetLowest();
+			}
 		}
 	}
 
