@@ -310,21 +310,21 @@ unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalO
 		expressions.push_back(std::move(f->filter));
 	}
 
+	std::cout << "Printing expressions in FilterPushdown::PushFinalFilters(...): " << std::endl;
+	for (auto& expr : expressions) {
+		std::cout << expr->ToString() << std::endl;
+	}
+
 	auto filter_op = AddLogicalFilter(std::move(op), std::move(expressions));
 
 	auto logical_filter = reinterpret_cast<LogicalFilter*>(filter_op.get());
-	bool has_udf = false;
-	for (auto &expr : logical_filter->expressions) {
-		// TODO: Check if contains a UDF!
-		if (expr->ContainsUDF()) {
-			has_udf = true;
-			break;
-		}
-	}
 
-	// If this filter has a UDF, we need to check if there are UDF filters below it.
-	if (has_udf) {
+	std::cout << "IsUDFFilter()? ";
+	if (logical_filter->IsUDFFilter()) {
+		std::cout << "YES!" << std::endl;
 		bool has_udf_filter_below = HasUDFFilterInSubtree(filter_op->children[0].get());
+		std::cout << "PRINTING FILTER OP: \n" << filter_op->ToString() << std::endl;
+		std::cout << "has_udf_filter_below? " << (has_udf_filter_below ? "true" : "false") << std::endl;
 
 		if (!has_udf_filter_below) {
 			// We are the bottom, thus we have a special job to do! Sample and route.
@@ -333,6 +333,8 @@ unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalO
 				expr->SetLowest();
 			}
 		}
+	} else {
+		std::cout << "NO!" << std::endl;
 	}
 
 	return filter_op;
@@ -344,11 +346,9 @@ bool FilterPushdown::HasUDFFilterInSubtree(LogicalOperator* op) {
 	}
 
 	if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
-		auto filter = reinterpret_cast<LogicalFilter*>(op);
-		for (auto &expr : filter->expressions) {
-			if (expr->ContainsUDF()) {
-				return true;
-			}
+		auto& filter = op->Cast<LogicalFilter>();
+		if (filter.IsUDFFilter()) {
+			return true;
 		}
 	}
 
