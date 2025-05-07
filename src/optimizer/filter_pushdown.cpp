@@ -1,6 +1,7 @@
 #include "duckdb/optimizer/filter_pushdown.hpp"
 #include "duckdb/optimizer/filter_combiner.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
@@ -327,9 +328,11 @@ unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalO
 		std::cout << "has_udf_filter_below? " << (has_udf_filter_below ? "true" : "false") << std::endl;
 
 		if (!has_udf_filter_below) {
+			std::cout << "Should be iterating over the expressions" << std::endl;
 			// We are the bottom, thus we have a special job to do! Sample and route.
 			// For every expression in this filter we need to make it know that it is the bottom.
 			for (auto &expr : logical_filter->expressions) {
+				std::cout << "SETTING LOWEST!!!" << std::endl;
 				expr->SetLowest();
 			}
 		}

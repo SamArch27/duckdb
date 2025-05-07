@@ -70,6 +70,7 @@ protected:
 		alias = other.alias;
 		return_type = other.return_type;
 		query_location = other.query_location;
+		is_lowest = other.is_lowest;
 	}
 
 

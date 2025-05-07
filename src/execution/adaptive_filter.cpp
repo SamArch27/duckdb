@@ -26,6 +26,9 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 	right_random_border = 100 * (conj_expr.children.size() - 1);
 	tuples_filtered = 0;
 	tuples_sampled = 0;
+	std::cout << "Are we the bottom UDF filter? " << std::endl;
+	std::cout << expr.ToString() << std::endl;
+	std::cout << "Lowest? " << expr.IsLowest() << std::endl;
 	if (expr.IsLowest()) {
 		std::cout << "BOTTOM UDF FILTER IS" << std::endl;
 		std::cout << expr.ToString() << std::endl;
