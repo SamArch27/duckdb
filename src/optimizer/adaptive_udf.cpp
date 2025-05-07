@@ -50,6 +50,9 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 								match = curr;
 								if (best != 42) {
 									child_filter.expressions.clear();
+								} else {
+									child_filter.expressions.emplace_back(
+									    make_uniq<BoundConstantExpression>(Value::BOOLEAN(true)));
 								}
 								break;
 							}
