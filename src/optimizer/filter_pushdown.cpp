@@ -195,6 +195,9 @@ unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> 
 		// attach UDF filters above
 		for (auto &expr : udf_expressions) {
 			auto dup_filter = make_uniq<LogicalFilter>();
+			if (result->has_estimated_cardinality) {
+				dup_filter->SetEstimatedCardinality(result->estimated_cardinality);
+			}
 			dup_filter->expressions.push_back(expr->Copy());
 			dup_filter->children.push_back(std::move(result));
 			result = std::move(dup_filter);

@@ -16,6 +16,7 @@
 #include "duckdb/execution/column_binding_resolver.hpp"
 #include "duckdb/execution/binding_rewriter.hpp"
 #include "duckdb/main/config.hpp"
+#include <iostream>
 
 namespace duckdb {
 
@@ -49,6 +50,9 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 								match = curr;
 								if (best != 42) {
 									child_filter.expressions.clear();
+								} else {
+									child_filter.expressions.emplace_back(
+									    make_uniq<BoundConstantExpression>(Value::BOOLEAN(true)));
 								}
 								break;
 							}
@@ -269,13 +273,58 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		}
 	}
 
-	return root_filter;
-	// Next TODO:
-	// 2. Compute cost formulas for each plan
+	// TODO: Compute cost formulas for each placement
+	struct ParametricCost {
+		int scalar_component;
+		int cost_component;
+		int selectivity_component;
+	};
 
-	// After Kyle's part TODO:
-	// 3. Make the projection plug in the batch cost/selectivity from the lowest filter when computing the
-	// "best" value
+	// costs are initially zero for each placement
+	vector<ParametricCost> placement_costs(placement, {0, 0, 0});
+
+	int udf_filter_count = 0;
+	for (auto &op : stream) {
+		// check if it's a UDF filter
+		bool is_udf_filter = false;
+		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+			auto &filter = op->Cast<LogicalFilter>();
+			if (filter.IsUDFFilter()) {
+				is_udf_filter = true;
+			}
+		}
+
+		for (int i = 0; i < placement; ++i) {
+			// haven't evaluated the UDF filter yet
+			if (i >= udf_filter_count) {
+				placement_costs[i].scalar_component += op->estimated_cardinality;
+			}
+			// evaluating the UDF now
+			if (i == udf_filter_count && is_udf_filter) {
+				// TODO: Change from cardinality to NDV (divide by filter selectivities)
+				placement_costs[i].cost_component += op->estimated_cardinality;
+			}
+			// evaluated the UDF filter already
+			if (i < udf_filter_count) {
+				placement_costs[i].selectivity_component += op->estimated_cardinality;
+			}
+		}
+
+		if (is_udf_filter) {
+			++udf_filter_count;
+		}
+	}
+
+	std::cout << "Printing Placement Costs: " << std::endl;
+	for (int i = 0; i < placement; ++i) {
+		std::cout << "f_" << i << "(c,s) = " << placement_costs[i].scalar_component << " + "
+		          << placement_costs[i].cost_component << "c + " << placement_costs[i].selectivity_component << "s"
+		          << std::endl;
+	}
+
+	// TODO: Plug them into the projection with Kyle's part
+
+	return root_filter;
 } // namespace duckdb
 
 unique_ptr<LogicalOperator> AdaptiveUDF::Rewrite(unique_ptr<LogicalOperator> op) {
