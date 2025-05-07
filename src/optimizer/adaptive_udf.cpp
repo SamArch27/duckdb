@@ -19,7 +19,8 @@
 
 namespace duckdb {
 
-AdaptiveUDF::AdaptiveUDF(Optimizer &optimizer, int64_t best) : optimizer(optimizer), best(best) {
+AdaptiveUDF::AdaptiveUDF(Optimizer &optimizer, int64_t best)
+    : optimizer(optimizer), best(best), rewriter(old_new_bindings) {
 }
 
 unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOperator> root_filter) {
@@ -102,7 +103,6 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	D_ASSERT(bindings.size() == types.size());
 	idx_t new_tbl_idx = optimizer.binder.GenerateTableIndex();
 	idx_t tbl_idx = bindings[0].table_index;
-	vector<pair<ColumnBinding, ColumnBinding>> old_new_bindings;
 	for (idx_t col_idx = 0; col_idx < bindings.size(); col_idx++) {
 		D_ASSERT(tbl_idx == bindings[col_idx].table_index);
 		project_expressions.emplace_back(make_uniq<BoundColumnRefExpression>(types[col_idx], bindings[col_idx]));
@@ -124,7 +124,6 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	last_filter.children.clear();
 
 	// rewrite the old bindings above to use the new binding
-	BindingRewriter rewriter(old_new_bindings);
 	for (auto &op : stream) {
 		// rewrite the expressions
 		rewriter.VisitOperatorExpressions(*op);
@@ -291,6 +290,7 @@ unique_ptr<LogicalOperator> AdaptiveUDF::Rewrite(unique_ptr<LogicalOperator> op)
 
 	for (idx_t i = 0; i < op->children.size(); i++) {
 		op->children[i] = Rewrite(std::move(op->children[i]));
+		rewriter.VisitOperatorExpressions(*op->children[i]);
 	}
 
 	return op;

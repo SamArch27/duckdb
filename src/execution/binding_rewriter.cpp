@@ -3,7 +3,7 @@
 
 namespace duckdb {
 
-BindingRewriter::BindingRewriter(const vector<pair<ColumnBinding, ColumnBinding>> &old_new_bindings)
+BindingRewriter::BindingRewriter(vector<pair<ColumnBinding, ColumnBinding>> &old_new_bindings)
     : old_new_bindings(old_new_bindings) {
 }
 

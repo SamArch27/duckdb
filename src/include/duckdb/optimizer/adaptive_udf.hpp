@@ -9,6 +9,8 @@
 #pragma once
 
 #include "duckdb/planner/logical_operator_visitor.hpp"
+#include "duckdb/common/pair.hpp"
+#include "duckdb/execution/binding_rewriter.hpp"
 
 namespace duckdb {
 class Optimizer;
@@ -26,5 +28,7 @@ private:
 
 	Optimizer &optimizer;
 	int64_t best;
+	vector<pair<ColumnBinding, ColumnBinding>> old_new_bindings;
+	BindingRewriter rewriter;
 };
 } // namespace duckdb
