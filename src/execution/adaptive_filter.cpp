@@ -4,6 +4,7 @@
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/vector.hpp"
+#include <iostream>
 
 namespace duckdb {
 
@@ -26,13 +27,15 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 	tuples_filtered = 0;
 	tuples_sampled = 0;
 	if (expr.IsLowest()) {
+		std::cout << "BOTTOM UDF FILTER IS" << std::endl;
+		std::cout << expr.ToString() << std::endl;
 		is_lowest_udf_filter = true;
 	}
 }
 
 AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters)
     : observe_interval(10), execute_interval(20), warmup(true) {
-	// TODO: Rewrite to have the initial order return 
+	std::cout << "AdaptiveFilter generated" << std::endl;
 	permutation = ExpressionHeuristics::GetInitialOrder(table_filters);
 	for (idx_t idx = 1; idx < table_filters.filters.size(); idx++) {
 		swap_likeliness.push_back(100);
