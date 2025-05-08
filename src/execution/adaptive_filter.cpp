@@ -14,6 +14,7 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 	if (conj_expr.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
 		disable_permutations = true;
 	}
+	bool is_lowest = false;
 	for (idx_t idx = 0; idx < conj_expr.children.size(); idx++) {
 		permutation.push_back(idx);
 		if (conj_expr.children[idx]->CanThrow()) {
@@ -22,6 +23,9 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 		if (idx != conj_expr.children.size() - 1) {
 			swap_likeliness.push_back(100);
 		}
+		if (conj_expr.children[idx]->IsLowest()) {
+			is_lowest = true;
+		}
 	}
 	right_random_border = 100 * (conj_expr.children.size() - 1);
 	tuples_filtered = 0;
@@ -29,7 +33,7 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 	std::cout << "Are we the bottom UDF filter? " << std::endl;
 	std::cout << expr.ToString() << std::endl;
 	std::cout << "Lowest? " << expr.IsLowest() << std::endl;
-	if (expr.IsLowest()) {
+	if (expr.IsLowest() || is_lowest) {
 		std::cout << "BOTTOM UDF FILTER IS" << std::endl;
 		std::cout << expr.ToString() << std::endl;
 		is_lowest_udf_filter = true;

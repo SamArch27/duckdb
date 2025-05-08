@@ -336,6 +336,7 @@ unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalO
 			// For every expression in this filter we need to make it know that it is the bottom.
 			for (auto &expr : logical_filter->expressions) {
 				std::cout << "SETTING LOWEST!!!" << std::endl;
+				std::cout << expr->ToString() << std::endl;
 				expr->SetLowest();
 			}
 		}
