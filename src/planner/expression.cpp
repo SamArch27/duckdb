@@ -29,6 +29,16 @@ bool Expression::ContainsUDF() const {
 	return contains_udf;
 }
 
+bool Expression::IsLowest() const {
+	bool is_lowest_local = is_lowest;
+	ExpressionIterator::EnumerateChildren(*this, [&](const Expression &child) { is_lowest_local |= child.IsLowest(); });
+	return is_lowest;
+}
+
+void Expression::SetLowest() {
+	is_lowest = true;
+}
+
 bool Expression::IsAggregate() const {
 	bool is_aggregate = false;
 	ExpressionIterator::EnumerateChildren(*this, [&](const Expression &child) { is_aggregate |= child.IsAggregate(); });

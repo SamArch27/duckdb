@@ -259,7 +259,7 @@ idx_t ExpressionHeuristics::Cost(TableFilter &filter) {
 	}
 }
 
-vector<idx_t> ExpressionHeuristics::GetInitialOrder(const TableFilterSet &table_filters) {
+vector<optional_idx> ExpressionHeuristics::GetInitialOrder(const TableFilterSet &table_filters) {
 	struct FilterCost {
 		idx_t index;
 		idx_t cost;
@@ -282,7 +282,7 @@ vector<idx_t> ExpressionHeuristics::GetInitialOrder(const TableFilterSet &table_
 	}
 	// sort by cost and put back in place
 	sort(filter_costs.begin(), filter_costs.end());
-	vector<idx_t> initial_permutation;
+	vector<optional_idx> initial_permutation;
 	for (idx_t i = 0; i < filter_costs.size(); i++) {
 		initial_permutation.push_back(filter_costs[i].index);
 	}

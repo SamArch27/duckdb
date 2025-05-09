@@ -33,6 +33,8 @@ public:
 	bool HasSubquery() const override;
 	bool IsScalar() const override;
 	bool HasParameter() const override;
+	bool IsLowest() const;
+	void SetLowest();
 
 	virtual bool IsVolatile() const;
 	virtual bool IsConsistent() const;
@@ -68,7 +70,13 @@ protected:
 		alias = other.alias;
 		return_type = other.return_type;
 		query_location = other.query_location;
+		is_lowest = other.is_lowest;
 	}
+
+
+private:
+	bool is_lowest = false;
 };
+
 
 } // namespace duckdb

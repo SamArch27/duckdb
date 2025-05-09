@@ -1,6 +1,7 @@
 #include "duckdb/optimizer/filter_pushdown.hpp"
 #include "duckdb/optimizer/filter_combiner.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
@@ -8,7 +9,6 @@
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_window.hpp"
-
 namespace duckdb {
 
 using Filter = FilterPushdown::Filter;
@@ -313,7 +313,40 @@ unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalO
 		expressions.push_back(std::move(f->filter));
 	}
 
-	return AddLogicalFilter(std::move(op), std::move(expressions));
+	auto filter_op = AddLogicalFilter(std::move(op), std::move(expressions));
+	if (filter_op->type == LogicalOperatorType::LOGICAL_FILTER) {
+		auto &filter = filter_op->Cast<LogicalFilter>();
+		if (filter.IsUDFFilter()) {
+			bool udf_filter_below = HasUDFFilterInSubtree(filter_op->children[0].get());
+			if (!udf_filter_below) {
+				for (auto &expr : filter.expressions) {
+					expr->SetLowest();
+				}
+			}
+		}
+	}
+	return filter_op;
+}
+
+bool FilterPushdown::HasUDFFilterInSubtree(LogicalOperator *op) {
+	if (!op) {
+		return false;
+	}
+
+	if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+		auto &filter = op->Cast<LogicalFilter>();
+		if (filter.IsUDFFilter()) {
+			return true;
+		}
+	}
+
+	for (auto &child : op->children) {
+		if (HasUDFFilterInSubtree(child.get())) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 unique_ptr<LogicalOperator> FilterPushdown::FinishPushdown(unique_ptr<LogicalOperator> op) {

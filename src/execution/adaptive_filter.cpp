@@ -13,6 +13,7 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 	if (conj_expr.GetExpressionType() == ExpressionType::CONJUNCTION_OR) {
 		disable_permutations = true;
 	}
+	bool is_lowest = false;
 	for (idx_t idx = 0; idx < conj_expr.children.size(); idx++) {
 		permutation.push_back(idx);
 		if (conj_expr.children[idx]->CanThrow()) {
@@ -21,8 +22,19 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 		if (idx != conj_expr.children.size() - 1) {
 			swap_likeliness.push_back(100);
 		}
+		if (conj_expr.children[idx]->IsLowest()) {
+			is_lowest_udf_filter = true;
+		}
 	}
 	right_random_border = 100 * (conj_expr.children.size() - 1);
+	tuples_before_filter = 0;
+	tuples_after_filter = 0;
+
+	if (is_lowest_udf_filter) {
+		// disable redundant AND true
+		disable_permutations = false;
+		permutation[1] = optional_idx();
+	}
 }
 
 AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters)
@@ -32,6 +44,8 @@ AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters)
 		swap_likeliness.push_back(100);
 	}
 	right_random_border = 100 * (table_filters.filters.size() - 1);
+	tuples_before_filter = 0;
+	tuples_after_filter = 0;
 }
 
 AdaptiveFilterState AdaptiveFilter::BeginFilter() const {
@@ -49,12 +63,36 @@ void AdaptiveFilter::EndFilter(AdaptiveFilterState state) {
 		return;
 	}
 	auto end_time = high_resolution_clock::now();
+	tuples_before_filter += state.tuples_before_filter;
+	tuples_after_filter += state.tuples_after_filter;
 	AdaptRuntimeStatistics(duration_cast<duration<double>>(end_time - state.start_time).count());
+}
+
+double AdaptiveFilter::getSampledCost() {
+	return runtime_sum / tuples_before_filter;
+}
+
+double AdaptiveFilter::getSampledSelectivity() {
+	return tuples_after_filter / tuples_before_filter;
 }
 
 void AdaptiveFilter::AdaptRuntimeStatistics(double duration) {
 	iteration_count++;
 	runtime_sum += duration;
+
+	if (is_lowest_udf_filter) {
+		// toggle the filter off after 5 iterations
+		if (iteration_count == 5) {
+			permutation[0] = optional_idx();
+		}
+		// reset statistics for the warmup period
+		else if (iteration_count < 5) {
+			tuples_before_filter = 0;
+			tuples_after_filter = 0;
+			runtime_sum = 0;
+		}
+		return;
+	}
 
 	D_ASSERT(!disable_permutations);
 	if (!warmup) {

@@ -9,6 +9,7 @@ namespace duckdb {
 struct ConjunctionState : public ExpressionState {
 	ConjunctionState(const Expression &expr, ExpressionExecutorState &root) : ExpressionState(expr, root) {
 		adaptive_filter = make_uniq<AdaptiveFilter>(expr);
+		adaptive_filter->is_lowest_udf_filter = adaptive_filter->IsLowestFilter();
 	}
 	unique_ptr<AdaptiveFilter> adaptive_filter;
 };
@@ -73,9 +74,15 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 			true_sel = temp_true.get();
 		}
 		for (idx_t i = 0; i < expr.children.size(); i++) {
-			idx_t tcount = Select(*expr.children[state.adaptive_filter->permutation[i]],
-			                      state.child_states[state.adaptive_filter->permutation[i]].get(), current_sel,
-			                      current_count, true_sel, temp_false.get());
+			// Extract the valid index from the optional
+			auto idx = state.adaptive_filter->permutation[i];
+			if (!idx.IsValid()) {
+				continue;
+			}
+			idx_t index = idx.GetIndex();
+			// Select using the valid index
+			idx_t tcount = Select(*expr.children[index], state.child_states[index].get(), current_sel, current_count,
+			                      true_sel, temp_false.get());
 			idx_t fcount = current_count - tcount;
 			if (fcount > 0 && false_sel) {
 				// move failing tuples into the false_sel
@@ -93,6 +100,8 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 				// iterations
 				current_sel = true_sel;
 			}
+			filter_state.tuples_before_filter += tcount + fcount;
+			filter_state.tuples_after_filter += tcount;
 		}
 		// adapt runtime statistics
 		state.adaptive_filter->EndFilter(filter_state);
@@ -114,24 +123,32 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 			false_sel = temp_false.get();
 		}
 		for (idx_t i = 0; i < expr.children.size(); i++) {
-			idx_t tcount = Select(*expr.children[state.adaptive_filter->permutation[i]],
-			                      state.child_states[state.adaptive_filter->permutation[i]].get(), current_sel,
-			                      current_count, temp_true.get(), false_sel);
-
-			if (tcount > 0) {
-				if (true_sel) {
-					// tuples passed, move them into the actual result vector
-					for (idx_t i = 0; i < tcount; i++) {
-						true_sel->set_index(result_count++, temp_true->get_index(i));
+			// Extract the valid index from the optional
+			auto idx = state.adaptive_filter->permutation[i];
+			if (idx.IsValid()) { // Check if it's valid
+				idx_t index = idx.GetIndex();
+				// Select using the valid index
+				idx_t tcount = Select(*expr.children[index], state.child_states[index].get(), current_sel,
+				                      current_count, temp_true.get(), false_sel);
+				if (tcount > 0) {
+					if (true_sel) {
+						// tuples passed, move them into the actual result vector
+						for (idx_t i = 0; i < tcount; i++) {
+							true_sel->set_index(result_count++, temp_true->get_index(i));
+						}
 					}
-				}
-				if (tcount == current_count) {
-					break;
-				}
+					if (tcount == current_count) {
+						break;
+					}
 
-				// now move on to check only the non-passing tuples
-				current_count -= tcount;
-				current_sel = false_sel;
+					// now move on to check only the non-passing tuples
+					current_count -= tcount;
+					current_sel = false_sel;
+				}
+			} else {
+				// Handle invalid index (optional is not set)
+				// You can decide what action to take in this case (skip or error out)
+				throw InternalException("Invalid index in permutation array!");
 			}
 		}
 
