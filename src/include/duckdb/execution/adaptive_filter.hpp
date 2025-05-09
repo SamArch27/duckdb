@@ -17,8 +17,8 @@ namespace duckdb {
 
 struct AdaptiveFilterState {
 	time_point<high_resolution_clock> start_time;
-	uint32_t tuples_sampled;
-	uint32_t tuples_filtered;
+	uint32_t tuples_before_filter;
+	uint32_t tuples_after_filter;
 };
 
 class AdaptiveFilter {
@@ -50,8 +50,8 @@ private:
 	idx_t right_random_border = 0;
 	idx_t observe_interval = 0;
 	idx_t execute_interval = 0;
-	uint32_t tuples_sampled = 0;
-	uint32_t tuples_filtered = 0;
+	uint32_t tuples_before_filter = 0;
+	uint32_t tuples_after_filter = 0;
 	double runtime_sum = 0;
 	double prev_mean = 0;
 	bool observe = false;

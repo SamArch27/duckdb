@@ -27,8 +27,8 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 		}
 	}
 	right_random_border = 100 * (conj_expr.children.size() - 1);
-	tuples_filtered = 0;
-	tuples_sampled = 0;
+	tuples_before_filter = 0;
+	tuples_after_filter = 0;
 
 	if (is_lowest_udf_filter) {
 		// disable redundant AND true
@@ -44,8 +44,8 @@ AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters)
 		swap_likeliness.push_back(100);
 	}
 	right_random_border = 100 * (table_filters.filters.size() - 1);
-	tuples_filtered = 0;
-	tuples_sampled = 0;
+	tuples_before_filter = 0;
+	tuples_after_filter = 0;
 }
 
 AdaptiveFilterState AdaptiveFilter::BeginFilter() const {
@@ -63,17 +63,17 @@ void AdaptiveFilter::EndFilter(AdaptiveFilterState state) {
 		return;
 	}
 	auto end_time = high_resolution_clock::now();
-	tuples_sampled += state.tuples_sampled;
-	tuples_filtered += state.tuples_filtered;
+	tuples_before_filter += state.tuples_before_filter;
+	tuples_after_filter += state.tuples_after_filter;
 	AdaptRuntimeStatistics(duration_cast<duration<double>>(end_time - state.start_time).count());
 }
 
 double AdaptiveFilter::getSampledCost() {
-	return runtime_sum / tuples_sampled;
+	return runtime_sum / tuples_before_filter;
 }
 
 double AdaptiveFilter::getSampledSelectivity() {
-	return tuples_filtered / tuples_sampled;
+	return tuples_after_filter / tuples_before_filter;
 }
 
 void AdaptiveFilter::AdaptRuntimeStatistics(double duration) {
@@ -87,8 +87,8 @@ void AdaptiveFilter::AdaptRuntimeStatistics(double duration) {
 		}
 		// reset statistics for the warmup period
 		else if (iteration_count < 5) {
-			tuples_filtered = 0;
-			tuples_sampled = 0;
+			tuples_before_filter = 0;
+			tuples_after_filter = 0;
 			runtime_sum = 0;
 		}
 		return;
