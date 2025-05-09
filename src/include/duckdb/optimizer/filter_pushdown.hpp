@@ -40,7 +40,7 @@ public:
 	};
 
 	// TODO: Provide comments here.
-	bool HasUDFFilterInSubtree(LogicalOperator* op);
+	bool HasUDFFilterInSubtree(LogicalOperator *op);
 
 private:
 	Optimizer &optimizer;
@@ -94,7 +94,6 @@ private:
 	unique_ptr<LogicalOperator> PushFinalFilters(unique_ptr<LogicalOperator> op);
 	// Finish pushing down at this operator, creating a LogicalFilter to store any of the stored filters and recursively
 	// pushing down into its children (if any)
-
 
 	unique_ptr<LogicalOperator> FinishPushdown(unique_ptr<LogicalOperator> op);
 	//! Adds a filter to the set of filters. Returns FilterResult::UNSATISFIABLE if the subtree should be stripped, or

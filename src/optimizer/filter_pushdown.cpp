@@ -9,7 +9,6 @@
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_window.hpp"
-
 namespace duckdb {
 
 using Filter = FilterPushdown::Filter;
@@ -314,46 +313,28 @@ unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalO
 		expressions.push_back(std::move(f->filter));
 	}
 
-	std::cout << "Printing expressions in FilterPushdown::PushFinalFilters(...): " << std::endl;
-	for (auto& expr : expressions) {
-		std::cout << expr->ToString() << std::endl;
-	}
-
 	auto filter_op = AddLogicalFilter(std::move(op), std::move(expressions));
-
-	auto logical_filter = reinterpret_cast<LogicalFilter*>(filter_op.get());
-
-	std::cout << "IsUDFFilter()? ";
-	if (logical_filter->IsUDFFilter()) {
-		std::cout << "YES!" << std::endl;
-		bool has_udf_filter_below = HasUDFFilterInSubtree(filter_op->children[0].get());
-		std::cout << "PRINTING FILTER OP: \n" << filter_op->ToString() << std::endl;
-		std::cout << "has_udf_filter_below? " << (has_udf_filter_below ? "true" : "false") << std::endl;
-
-		if (!has_udf_filter_below) {
-			std::cout << "Should be iterating over the expressions" << std::endl;
-			// We are the bottom, thus we have a special job to do! Sample and route.
-			// For every expression in this filter we need to make it know that it is the bottom.
-			for (auto &expr : logical_filter->expressions) {
-				std::cout << "SETTING LOWEST!!!" << std::endl;
-				std::cout << expr->ToString() << std::endl;
-				expr->SetLowest();
+	if (filter_op->type == LogicalOperatorType::LOGICAL_FILTER) {
+		auto &filter = filter_op->Cast<LogicalFilter>();
+		if (filter.IsUDFFilter()) {
+			bool udf_filter_below = HasUDFFilterInSubtree(filter_op->children[0].get());
+			if (!udf_filter_below) {
+				for (auto &expr : filter.expressions) {
+					expr->SetLowest();
+				}
 			}
 		}
-	} else {
-		std::cout << "NO!" << std::endl;
 	}
-
 	return filter_op;
 }
 
-bool FilterPushdown::HasUDFFilterInSubtree(LogicalOperator* op) {
+bool FilterPushdown::HasUDFFilterInSubtree(LogicalOperator *op) {
 	if (!op) {
 		return false;
 	}
 
 	if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
-		auto& filter = op->Cast<LogicalFilter>();
+		auto &filter = op->Cast<LogicalFilter>();
 		if (filter.IsUDFFilter()) {
 			return true;
 		}
