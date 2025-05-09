@@ -76,11 +76,13 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 		for (idx_t i = 0; i < expr.children.size(); i++) {
 			// Extract the valid index from the optional
 			auto idx = state.adaptive_filter->permutation[i];
-			if (!idx.IsValid()) { continue; }
+			if (!idx.IsValid()) {
+				continue;
+			}
 			idx_t index = idx.GetIndex();
 			// Select using the valid index
-			idx_t tcount = Select(*expr.children[index],
-								  state.child_states[index].get(), current_sel, current_count, true_sel, temp_false.get());
+			idx_t tcount = Select(*expr.children[index], state.child_states[index].get(), current_sel, current_count,
+			                      true_sel, temp_false.get());
 			idx_t fcount = current_count - tcount;
 			if (fcount > 0 && false_sel) {
 				// move failing tuples into the false_sel
@@ -123,20 +125,21 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 		for (idx_t i = 0; i < expr.children.size(); i++) {
 			// Extract the valid index from the optional
 			auto idx = state.adaptive_filter->permutation[i];
-			if (idx.IsValid()) {  // Check if it's valid
+			if (idx.IsValid()) { // Check if it's valid
 				idx_t index = idx.GetIndex();
 				// Select using the valid index
-				idx_t tcount = Select(*expr.children[index],
-				                      state.child_states[index].get(), current_sel, current_count, temp_true.get(), false_sel);
+				idx_t tcount = Select(*expr.children[index], state.child_states[index].get(), current_sel,
+				                      current_count, temp_true.get(), false_sel);
 				if (tcount > 0) {
 					if (true_sel) {
 						// tuples passed, move them into the actual result vector
 						for (idx_t i = 0; i < tcount; i++) {
-							true_sel->set_index(result_count++, temp_true->get_index(i));}
-				}
-				if (tcount == current_count) {
-					break;
+							true_sel->set_index(result_count++, temp_true->get_index(i));
 						}
+					}
+					if (tcount == current_count) {
+						break;
+					}
 
 					// now move on to check only the non-passing tuples
 					current_count -= tcount;

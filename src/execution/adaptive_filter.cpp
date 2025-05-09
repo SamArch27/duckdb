@@ -4,7 +4,6 @@
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/vector.hpp"
-#include <iostream>
 
 namespace duckdb {
 
@@ -24,25 +23,22 @@ AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), e
 			swap_likeliness.push_back(100);
 		}
 		if (conj_expr.children[idx]->IsLowest()) {
-			is_lowest = true;
+			is_lowest_udf_filter = true;
 		}
 	}
 	right_random_border = 100 * (conj_expr.children.size() - 1);
 	tuples_filtered = 0;
 	tuples_sampled = 0;
-	std::cout << "Are we the bottom UDF filter? " << std::endl;
-	std::cout << expr.ToString() << std::endl;
-	std::cout << "Lowest? " << expr.IsLowest() << std::endl;
-	if (expr.IsLowest() || is_lowest) {
-		std::cout << "BOTTOM UDF FILTER IS" << std::endl;
-		std::cout << expr.ToString() << std::endl;
-		is_lowest_udf_filter = true;
+
+	if (is_lowest_udf_filter) {
+		// disable redundant AND true
+		disable_permutations = false;
+		permutation[1] = optional_idx();
 	}
 }
 
 AdaptiveFilter::AdaptiveFilter(const TableFilterSet &table_filters)
     : observe_interval(10), execute_interval(20), warmup(true) {
-	std::cout << "AdaptiveFilter generated" << std::endl;
 	permutation = ExpressionHeuristics::GetInitialOrder(table_filters);
 	for (idx_t idx = 1; idx < table_filters.filters.size(); idx++) {
 		swap_likeliness.push_back(100);
@@ -83,6 +79,20 @@ double AdaptiveFilter::getSampledSelectivity() {
 void AdaptiveFilter::AdaptRuntimeStatistics(double duration) {
 	iteration_count++;
 	runtime_sum += duration;
+
+	if (is_lowest_udf_filter) {
+		// toggle the filter off after 5 iterations
+		if (iteration_count == 5) {
+			permutation[0] = optional_idx();
+		}
+		// reset statistics for the warmup period
+		else if (iteration_count < 5) {
+			tuples_filtered = 0;
+			tuples_sampled = 0;
+			runtime_sum = 0;
+		}
+		return;
+	}
 
 	D_ASSERT(!disable_permutations);
 	if (!warmup) {
