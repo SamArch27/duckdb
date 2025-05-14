@@ -1,12 +1,24 @@
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 
 namespace duckdb {
 
 unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalProjection &op) {
 	D_ASSERT(op.children.size() == 1);
+
+	bool udf_filter = false;
+	if (op.children[0]->type == LogicalOperatorType::LOGICAL_FILTER) {
+		auto &filter = op.children[0]->Cast<LogicalFilter>();
+		if (filter.expressions.size() == 2) {
+			if (filter.expressions[0]->ContainsUDF()) {
+				udf_filter = true;
+			}
+		}
+	}
+
 	auto plan = CreatePlan(*op.children[0]);
 
 #ifdef DEBUG
@@ -34,6 +46,16 @@ unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalProjection
 			// the projection only directly projects the child' columns: omit it entirely
 			return plan;
 		}
+	}
+
+	if (udf_filter) {
+		auto &filter = *plan;
+		auto below_filter = std::move(plan->children[0]);
+		plan->children.clear();
+		auto projection = make_uniq<PhysicalProjection>(op.types, std::move(op.expressions), op.estimated_cardinality,
+		                                                std::move(plan));
+		projection->children.push_back(std::move(below_filter));
+		return std::move(projection);
 	}
 
 	auto projection = make_uniq<PhysicalProjection>(op.types, std::move(op.expressions), op.estimated_cardinality);

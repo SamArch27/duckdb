@@ -1,16 +1,22 @@
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
+#include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
-
 namespace duckdb {
 
 class ProjectionState : public OperatorState {
 public:
-	explicit ProjectionState(ExecutionContext &context, const vector<unique_ptr<Expression>> &expressions)
+	explicit ProjectionState(ExecutionContext &context, const vector<unique_ptr<Expression>> &expressions,
+	                         const unique_ptr<PhysicalOperator> &filter)
 	    : executor(context.client, expressions) {
+		if (filter) {
+			intermediate_chunk = make_uniq<DataChunk>();
+			intermediate_chunk->Initialize(Allocator::DefaultAllocator(), filter->GetTypes());
+		}
 	}
 
+	unique_ptr<DataChunk> intermediate_chunk;
 	ExpressionExecutor executor;
 
 public:
@@ -20,20 +26,27 @@ public:
 };
 
 PhysicalProjection::PhysicalProjection(vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
-                                       idx_t estimated_cardinality)
+                                       idx_t estimated_cardinality, unique_ptr<PhysicalOperator> op)
     : PhysicalOperator(PhysicalOperatorType::PROJECTION, std::move(types), estimated_cardinality),
-      select_list(std::move(select_list)) {
+      select_list(std::move(select_list)), filter(std::move(op)) {
 }
 
 OperatorResultType PhysicalProjection::Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
                                                GlobalOperatorState &gstate, OperatorState &state_p) const {
 	auto &state = state_p.Cast<ProjectionState>();
+
+	if (filter) {
+		filter->Execute(context, input, *(state.intermediate_chunk), gstate, *filter->GetOperatorState(context));
+		state.executor.Execute(*(state.intermediate_chunk), chunk);
+		return OperatorResultType::NEED_MORE_INPUT;
+	}
+
 	state.executor.Execute(input, chunk);
 	return OperatorResultType::NEED_MORE_INPUT;
 }
 
 unique_ptr<OperatorState> PhysicalProjection::GetOperatorState(ExecutionContext &context) const {
-	return make_uniq<ProjectionState>(context, select_list);
+	return make_uniq<ProjectionState>(context, select_list, filter);
 }
 
 unique_ptr<PhysicalOperator>
