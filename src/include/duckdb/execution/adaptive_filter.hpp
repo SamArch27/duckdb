@@ -12,11 +12,13 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/chrono.hpp"
 #include "duckdb/common/random_engine.hpp"
-
+#include "duckdb/common/types.hpp"
 namespace duckdb {
 
 struct AdaptiveFilterState {
 	time_point<high_resolution_clock> start_time;
+	uint32_t tuples_before_filter;
+	uint32_t tuples_after_filter;
 };
 
 class AdaptiveFilter {
@@ -24,13 +26,20 @@ public:
 	explicit AdaptiveFilter(const Expression &expr);
 	explicit AdaptiveFilter(const TableFilterSet &table_filters);
 
-	vector<idx_t> permutation;
+	vector<optional_idx> permutation;
+	bool is_lowest_udf_filter = false;
 
 public:
 	void AdaptRuntimeStatistics(double duration);
 
 	AdaptiveFilterState BeginFilter() const;
 	void EndFilter(AdaptiveFilterState state);
+	bool IsLowestFilter() const {
+		return is_lowest_udf_filter;
+	}
+
+	double getSampledCost(void);
+	double getSampledSelectivity(void);
 
 private:
 	bool disable_permutations = false;
@@ -41,6 +50,8 @@ private:
 	idx_t right_random_border = 0;
 	idx_t observe_interval = 0;
 	idx_t execute_interval = 0;
+	uint32_t tuples_before_filter = 0;
+	uint32_t tuples_after_filter = 0;
 	double runtime_sum = 0;
 	double prev_mean = 0;
 	bool observe = false;
