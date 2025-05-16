@@ -3,6 +3,7 @@
 #include "duckdb/common/enums/join_type.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/pair.hpp"
+#include "duckdb/common/queue.hpp"
 #include "duckdb/optimizer/join_order/cost_model.hpp"
 #include "duckdb/optimizer/join_order/plan_enumerator.hpp"
 #include "duckdb/planner/expression/list.hpp"
@@ -32,6 +33,7 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 
 	// get relation_stats here since the reconstruction process will move all relations.
 	auto relation_stats = query_graph_manager.relation_manager.GetRelationStats();
+	query_graph_manager.relation_manager.PrintRelationStats();
 	unique_ptr<LogicalOperator> new_logical_plan = nullptr;
 
 	if (reorderable) {
@@ -73,6 +75,77 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 		new_logical_plan->SetEstimatedCardinality(3);
 	}
 
+	// BFS visit every operator
+	queue<LogicalOperator *> q;
+	q.push(new_logical_plan.get());
+	while (!q.empty()) {
+		auto *op = q.front();
+		q.pop();
+
+		// match on UDF filters
+		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
+			std::cout << "FILTER MATCH!" << std::endl;
+			auto &filter = op->Cast<LogicalFilter>();
+			if (filter.IsUDFFilter()) {
+				set<string> referenced_columns;
+				std::cout << "UDF FILTER MATCH!" << std::endl;
+				for (auto &expr : filter.expressions) {
+					if (expr->ContainsUDF()) {
+						std::cout << "Match on Expression: " << expr->ToString() << std::endl;
+						ExpressionIterator::EnumerateExpression(expr, [&](Expression &udf_expr) {
+							if (udf_expr.GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
+								auto &bound_func = udf_expr.Cast<BoundFunctionExpression>();
+								// match on the UDF expression itself
+								if (bound_func.function.IsUDF()) {
+									std::cout << "Match on UDF Expression: " << udf_expr.ToString() << std::endl;
+									for (auto &child : bound_func.children) {
+										ExpressionIterator::EnumerateExpression(child, [&](Expression &arg_expr) {
+											if (arg_expr.type == ExpressionType::BOUND_COLUMN_REF) {
+												std::cout << "Adding referenced column: " << arg_expr.ToString()
+												          << std::endl;
+												referenced_columns.insert(arg_expr.ToString());
+											}
+										});
+									}
+								}
+							}
+						});
+						if (!referenced_columns.empty()) {
+							idx_t product = 1;
+							for (auto &col : referenced_columns) {
+								// Find matching column in estimates
+								for (auto &stat : relation_stats) {
+									for (int i = 0; i < stat.column_names.size(); ++i) {
+										if (col == stat.column_names[i].substr(stat.column_names[i].find('.') + 1)) {
+											product *= stat.column_distinct_count[i].distinct_count;
+											std::cout << "Multiply distinct count from column: |" << col << "| of "
+											          << stat.column_distinct_count[i].distinct_count << std::endl;
+										}
+									}
+								}
+							}
+							if (product != 1) {
+								expr->SetDistinctValues(product);
+								std::cout << "Assigning distinct value count of: " << product << std::endl;
+								std::cout << "Assigning to expr: " << expr->ToString() << std::endl;
+							}
+						}
+						break;
+					}
+				}
+			}
+		}
+
+		for (auto &child : op->children) {
+			q.push(child.get());
+		}
+	}
+
+	// Find the UDF filter in the logical plan
+	// Find all column reference expressions
+	// If there are none, distinct count = card
+	// Otherwise, distinct count = min(card, d_1 x d_2 x ... d_n) where d_i is distinct count of a column
+	// Update the value in the Filter expr and make sure that its copied over each time
 	return new_logical_plan;
 }
 

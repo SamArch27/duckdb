@@ -15,6 +15,15 @@ void LogicalFilter::ResolveTypes() {
 	types = MapTypes(children[0]->types, projection_map);
 }
 
+optional_idx LogicalFilter::GetDistinctValues() const {
+	for (auto &expr : expressions) {
+		if (expr->GetDistinctValues().IsValid()) {
+			return expr->GetDistinctValues();
+		}
+	}
+	return optional_idx();
+}
+
 bool LogicalFilter::IsUDFFilter() const {
 	return expressions.size() == 1 && expressions[0]->ContainsUDF();
 } // namespace duckdb

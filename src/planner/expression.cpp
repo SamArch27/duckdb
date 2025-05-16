@@ -30,13 +30,34 @@ bool Expression::ContainsUDF() const {
 }
 
 bool Expression::IsLowest() const {
-	bool is_lowest_local = is_lowest;
+	if (is_lowest) {
+		return true;
+	}
+	bool is_lowest_local = false;
 	ExpressionIterator::EnumerateChildren(*this, [&](const Expression &child) { is_lowest_local |= child.IsLowest(); });
 	return is_lowest;
 }
 
 void Expression::SetLowest() {
 	is_lowest = true;
+}
+
+optional_idx Expression::GetDistinctValues() const {
+	if (distinct_values.IsValid()) {
+		return distinct_values;
+	}
+
+	optional_idx distinct_count;
+	ExpressionIterator::EnumerateChildren(*this, [&](const Expression &child) {
+		if (child.GetDistinctValues().IsValid()) {
+			distinct_count = child.GetDistinctValues();
+		}
+	});
+	return distinct_count;
+}
+
+void Expression::SetDistinctValues(optional_idx distinct_count) {
+	distinct_values = distinct_count;
 }
 
 bool Expression::IsAggregate() const {

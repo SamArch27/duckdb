@@ -23,9 +23,9 @@ public:
 
 	vector<idx_t> projection_map;
 
-	bool is_lowest_udf_filter = false;
-
 public:
+	optional_idx GetDistinctValues() const;
+
 	bool IsUDFFilter() const;
 
 	vector<ColumnBinding> GetColumnBindings() override;

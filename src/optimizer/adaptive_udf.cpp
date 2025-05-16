@@ -283,7 +283,18 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	// costs are initially zero for each placement
 	vector<ParametricCost> placement_costs(placement, {0, 0, 0});
 
+	optional_idx distinct_count;
+	auto &lowest_filter = new_project->children[0];
+	if (lowest_filter->type == LogicalOperatorType::LOGICAL_FILTER) {
+		std::cout << "Matched on lowest filter" << std::endl;
+		auto &filter = lowest_filter->Cast<LogicalFilter>();
+		std::cout << "Printing filter: " << std::endl;
+		std::cout << filter.ToString() << std::endl;
+		distinct_count = filter.GetDistinctValues();
+		std::cout << "Its distinct count is valid? " << (distinct_count.IsValid() ? "Yes" : "No") << std::endl;
+	}
 	int udf_filter_count = 0;
+
 	for (auto &op : stream) {
 		// check if it's a UDF filter
 		bool is_udf_filter = false;
@@ -301,8 +312,14 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 			}
 			// evaluating the UDF now
 			if (i == udf_filter_count && is_udf_filter) {
-				// TODO: Change from cardinality to NDV (divide by filter selectivities)
-				placement_costs[i].cost_component += op->estimated_cardinality;
+				if (distinct_count.IsValid()) {
+					std::cout << "Using distinct_values!" << std::endl;
+					std::cout << "Using min of: " << op->estimated_cardinality << " and " << distinct_count.GetIndex()
+					          << std::endl;
+					placement_costs[i].cost_component += MinValue(op->estimated_cardinality, distinct_count.GetIndex());
+				} else {
+					placement_costs[i].cost_component += op->estimated_cardinality;
+				}
 			}
 			// evaluated the UDF filter already
 			if (i < udf_filter_count) {
