@@ -704,6 +704,9 @@ FilterResult FilterCombiner::AddBoundComparisonFilter(Expression &expr) {
 }
 
 FilterResult FilterCombiner::AddFilter(Expression &expr) {
+	if (expr.ContainsUDF()) {
+		return FilterResult::UNSUPPORTED;
+	}
 	if (expr.HasParameter()) {
 		return FilterResult::UNSUPPORTED;
 	}

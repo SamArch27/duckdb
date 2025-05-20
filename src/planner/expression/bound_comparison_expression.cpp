@@ -1,6 +1,6 @@
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/parser/expression/comparison_expression.hpp"
-#include <iostream>
+
 namespace duckdb {
 
 BoundComparisonExpression::BoundComparisonExpression(ExpressionType type, unique_ptr<Expression> left,
@@ -10,11 +10,6 @@ BoundComparisonExpression::BoundComparisonExpression(ExpressionType type, unique
 }
 
 string BoundComparisonExpression::ToString() const {
-	if (GetDistinctValues().IsValid()) {
-		std::cout << "PRINTING DistinctValues(): " << GetDistinctValues().GetIndex() << std::endl;
-	} else {
-		std::cout << "PRINTING DistinctValues(): -1" << std::endl;
-	}
 	return ComparisonExpression::ToString<BoundComparisonExpression, Expression>(*this);
 }
 

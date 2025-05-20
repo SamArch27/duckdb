@@ -9,7 +9,6 @@
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_window.hpp"
-#include <iostream>
 namespace duckdb {
 
 using Filter = FilterPushdown::Filter;
@@ -97,7 +96,6 @@ FilterPushdown::FilterPushdown(Optimizer &optimizer, bool udf_filter_pushdown, b
 
 unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> op) {
 	D_ASSERT(!combiner.HasFilters());
-
 	unique_ptr<LogicalOperator> result;
 	vector<unique_ptr<Expression>> udf_expressions;
 
@@ -111,9 +109,7 @@ unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> 
 						        [&](unique_ptr<Expression> &udf_expr) { return Expression::Equals(udf_expr, expr); })) {
 							continue;
 						}
-						std::cout << "Expr before copy: " << expr->ToString() << std::endl;
 						udf_expressions.push_back(expr->Copy());
-						std::cout << "Expr after copy: " << udf_expressions.back()->ToString() << std::endl;
 					}
 				}
 			}
@@ -200,10 +196,7 @@ unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> 
 			if (result->has_estimated_cardinality) {
 				dup_filter->SetEstimatedCardinality(result->estimated_cardinality);
 			}
-			std::cout << "Again Expr before copy: " << expr->ToString() << std::endl;
 			dup_filter->expressions.push_back(expr->Copy());
-			std::cout << "Again Expr before copy: " << dup_filter->expressions.back()->ToString() << std::endl;
-
 			dup_filter->children.push_back(std::move(result));
 			result = std::move(dup_filter);
 		}
