@@ -16,7 +16,6 @@
 #include "duckdb/execution/column_binding_resolver.hpp"
 #include "duckdb/execution/binding_rewriter.hpp"
 #include "duckdb/main/config.hpp"
-#include <iostream>
 
 namespace duckdb {
 
@@ -323,13 +322,6 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		if (is_udf_filter) {
 			++udf_filter_count;
 		}
-	}
-
-	std::cout << "Printing Placement Costs: " << std::endl;
-	for (int i = 0; i < placement; ++i) {
-		std::cout << "f[" << i << "](c,s) = " << placement_costs[i].scalar_component << " + "
-		          << placement_costs[i].cost_component << "c + " << placement_costs[i].selectivity_component << "s"
-		          << std::endl;
 	}
 
 	// TODO: Plug them into the projection with Kyle's part
