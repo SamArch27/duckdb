@@ -3,6 +3,7 @@
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include <iostream>
@@ -50,21 +51,17 @@ OperatorResultType PhysicalProjection::Execute(ExecutionContext &context, DataCh
 		vector<uint32_t> scalar_costs;
 		int count = 0;
 		for (auto &formula : plan_costs) {
-			std::cout << "Parametric formula f[" << count << "](c,s): " << formula.scalar_component << " + "
-			          << formula.cost_component << "c + " << formula.selectivity_component << "s" << std::endl;
 			auto cost = adaptive_filter->GetSampledCost();
 			auto selectivity = adaptive_filter->GetSampledSelectivity();
-			std::cout << "Substituing c = " << cost << std::endl;
-			std::cout << "Substituing s = " << selectivity << std::endl;
 			scalar_costs.push_back(static_cast<uint32_t>(formula.scalar_component + formula.cost_component * cost +
 			                                             formula.selectivity_component * selectivity));
-			std::cout << "Parametric formula f[" << count << "](c,s): " << scalar_costs.back() << std::endl;
 			++count;
 		}
 
 		auto it = std::min_element(scalar_costs.begin(), scalar_costs.end());
-		auto idx = std::distance(scalar_costs.begin(), it);
-		std::cout << "Best plan is: f[" << idx << "] with cost: " << scalar_costs[idx] << std::endl << std::endl;
+		auto idx = std::distance(scalar_costs.begin(), it) + 1;
+
+		select_list.back()->Cast<BoundConstantExpression>().value = Value::INTEGER(idx);
 
 		state.executor.Execute(*(state.intermediate_chunk), chunk);
 		return OperatorResultType::NEED_MORE_INPUT;
