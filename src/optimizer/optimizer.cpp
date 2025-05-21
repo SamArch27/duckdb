@@ -1,5 +1,4 @@
 #include "duckdb/optimizer/optimizer.hpp"
-#include <iostream>
 #include "duckdb/execution/column_binding_resolver.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -131,9 +130,6 @@ void Optimizer::RunBuiltInOptimizers() {
 		plan = filter_pullup.Rewrite(std::move(plan));
 	});
 
-	std::cout << "BEFORE FILTER PUSHDOWN" << std::endl;
-	std::cout << plan->ToString() << std::endl;
-
 	// perform filter pushdown
 	RunOptimizer(OptimizerType::FILTER_PUSHDOWN, [&]() {
 		FilterPushdown filter_pushdown(*this, false);
@@ -141,9 +137,6 @@ void Optimizer::RunBuiltInOptimizers() {
 		filter_pushdown.CheckMarkToSemi(*plan, top_bindings);
 		plan = filter_pushdown.Rewrite(std::move(plan));
 	});
-
-	std::cout << "AFTER FILTER PUSHDOWN" << std::endl;
-	std::cout << plan->ToString() << std::endl;
 
 	// derive and push filters into materialized CTEs
 	RunOptimizer(OptimizerType::CTE_FILTER_PUSHER, [&]() {
@@ -173,21 +166,12 @@ void Optimizer::RunBuiltInOptimizers() {
 		plan = empty_result_pullup.Optimize(std::move(plan));
 	});
 
-	std::cout << "BEFORE JOIN ORDERING" << std::endl;
-	std::cout << plan->ToString() << std::endl;
-
 	// then we perform the join ordering optimization
 	// this also rewrites cross products + filters into joins and performs filter pushdowns
 	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 		JoinOrderOptimizer optimizer(context);
 		plan = optimizer.Optimize(std::move(plan));
 	});
-
-	std::cout << "AFTER JOIN ORDERING" << std::endl;
-	std::cout << plan->ToString() << std::endl;
-
-	std::cout << "BEFORE UDF FILTER PUSHDOWN" << std::endl;
-	std::cout << plan->ToString() << std::endl;
 
 	// perform udf filter pushdown
 	RunOptimizer(OptimizerType::FILTER_PUSHDOWN, [&]() {
@@ -197,9 +181,6 @@ void Optimizer::RunBuiltInOptimizers() {
 		filter_pushdown.CheckMarkToSemi(*plan, top_bindings);
 		plan = filter_pushdown.Rewrite(std::move(plan));
 	});
-
-	std::cout << "AFTER UDF FILTER PUSHDOWN" << std::endl;
-	std::cout << plan->ToString() << std::endl;
 
 	// rewrites UNNESTs in DelimJoins by moving them to the projection
 	RunOptimizer(OptimizerType::UNNEST_REWRITER, [&]() {
@@ -294,16 +275,11 @@ void Optimizer::RunBuiltInOptimizers() {
 		join_filter_pushdown.VisitOperator(*plan);
 	});
 
-	std::cout << "BEFORE UDF PLAN REWRITING:\n" << std::endl;
-	std::cout << plan->ToString() << std::endl;
-
 	// perform UDF plan rewriting (adaptivity)
 	RunOptimizer(OptimizerType::ADAPTIVE_UDF, [&]() {
 		AdaptiveUDF adaptive_udf(*this, DBConfig::GetConfig(context).options.best_udf_placement);
 		plan = adaptive_udf.Rewrite(std::move(plan));
 	});
-	std::cout << "AFTER UDF PLAN REWRITING:\n" << std::endl;
-	std::cout << plan->ToString() << std::endl;
 }
 
 unique_ptr<LogicalOperator> Optimizer::Optimize(unique_ptr<LogicalOperator> plan_p) {
