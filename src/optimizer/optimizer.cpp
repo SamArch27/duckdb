@@ -34,7 +34,6 @@
 #include "duckdb/optimizer/late_materialization.hpp"
 #include "duckdb/planner/binder.hpp"
 #include "duckdb/planner/planner.hpp"
-#include <iostream>
 
 namespace duckdb {
 
