@@ -5,6 +5,7 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include <iostream>
 namespace duckdb {
 
 class ProjectionState : public OperatorState {
@@ -46,11 +47,24 @@ OperatorResultType PhysicalProjection::Execute(ExecutionContext &context, DataCh
 		auto &conjunction_state = filter_state.executor.GetStates()[0]->root_state->Cast<ConjunctionState>();
 		auto &adaptive_filter = conjunction_state.adaptive_filter;
 
-		// TODO:
-		// 1. Get the cost and selectivity from the AdaptiveFilter
-		// 2. Plug it into each formula
-		// 3. Take the min
-		// 4. Project that value
+		vector<uint32_t> scalar_costs;
+		int count = 0;
+		for (auto &formula : plan_costs) {
+			std::cout << "Parametric formula f[" << count << "](c,s): " << formula.scalar_component << " + "
+			          << formula.cost_component << "c + " << formula.selectivity_component << "s" << std::endl;
+			auto cost = adaptive_filter->GetSampledCost();
+			auto selectivity = adaptive_filter->GetSampledSelectivity();
+			std::cout << "Substituing c = " << cost << std::endl;
+			std::cout << "Substituing s = " << selectivity << std::endl;
+			scalar_costs.push_back(static_cast<uint32_t>(formula.scalar_component + formula.cost_component * cost +
+			                                             formula.selectivity_component * selectivity));
+			std::cout << "Parametric formula f[" << count << "](c,s): " << scalar_costs.back() << std::endl;
+			++count;
+		}
+
+		auto it = std::min_element(scalar_costs.begin(), scalar_costs.end());
+		auto idx = std::distance(scalar_costs.begin(), it);
+		std::cout << "Best plan is: f[" << idx << "] with cost: " << scalar_costs[idx] << std::endl << std::endl;
 
 		state.executor.Execute(*(state.intermediate_chunk), chunk);
 		return OperatorResultType::NEED_MORE_INPUT;

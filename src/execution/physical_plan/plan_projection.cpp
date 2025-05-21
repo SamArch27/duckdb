@@ -54,6 +54,7 @@ unique_ptr<PhysicalOperator> PhysicalPlanGenerator::CreatePlan(LogicalProjection
 		plan->children.clear();
 		auto projection = make_uniq<PhysicalProjection>(op.types, std::move(op.expressions), op.estimated_cardinality,
 		                                                std::move(plan));
+		projection->plan_costs = op.plan_costs;
 		projection->children.push_back(std::move(below_filter));
 		return std::move(projection);
 	}

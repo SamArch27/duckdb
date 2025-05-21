@@ -272,13 +272,6 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		}
 	}
 
-	// TODO: Compute cost formulas for each placement
-	struct ParametricCost {
-		int scalar_component;
-		int cost_component;
-		int selectivity_component;
-	};
-
 	// costs are initially zero for each placement
 	vector<ParametricCost> placement_costs(placement, {0, 0, 0});
 
@@ -325,7 +318,8 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		}
 	}
 
-	// TODO: Plug them into the projection with Kyle's part
+	// Assign the plan costs to the projection node
+	new_project->Cast<LogicalProjection>().plan_costs = placement_costs;
 
 	return root_filter;
 } // namespace duckdb

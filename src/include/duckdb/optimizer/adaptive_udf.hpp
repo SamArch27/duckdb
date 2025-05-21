@@ -16,6 +16,11 @@ namespace duckdb {
 class Optimizer;
 
 //! The AdaptiveUDF pass rewrites the query plan to adaptively evaluate UDF predicates
+struct ParametricCost {
+	int scalar_component;
+	int cost_component;
+	int selectivity_component;
+};
 class AdaptiveUDF {
 public:
 	explicit AdaptiveUDF(Optimizer &optimizer, int64_t best);

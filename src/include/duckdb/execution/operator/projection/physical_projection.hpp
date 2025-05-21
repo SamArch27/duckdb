@@ -10,6 +10,7 @@
 
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/planner/expression.hpp"
+#include "duckdb/optimizer/adaptive_udf.hpp"
 
 namespace duckdb {
 
@@ -23,6 +24,7 @@ public:
 
 	vector<unique_ptr<Expression>> select_list;
 	unique_ptr<PhysicalOperator> filter;
+	vector<ParametricCost> plan_costs;
 
 public:
 	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const override;

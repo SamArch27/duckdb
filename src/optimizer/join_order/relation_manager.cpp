@@ -603,6 +603,7 @@ vector<unique_ptr<FilterInfo>> RelationManager::ExtractEdges(LogicalOperator &op
 // LCOV_EXCL_START
 
 void RelationManager::PrintRelationStats() {
+#ifdef DEBUG
 	string to_print;
 	for (idx_t i = 0; i < relations.size(); i++) {
 		auto &relation = relations.at(i);
@@ -617,6 +618,7 @@ void RelationManager::PrintRelationStats() {
 		to_print += " and relation id " + to_string(i) + "\n";
 		Printer::Print(to_print);
 	}
+#endif
 }
 
 // LCOV_EXCL_STOP

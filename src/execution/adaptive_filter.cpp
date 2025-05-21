@@ -69,7 +69,9 @@ void AdaptiveFilter::EndFilter(AdaptiveFilterState state) {
 }
 
 double AdaptiveFilter::GetSampledCost() {
-	return (tuples_before_filter == 0) ? 0 : static_cast<double>(runtime_sum) / tuples_before_filter;
+	// nanoseconds for a UDF batch
+	// nanoseconds of a predicate batch
+	return (tuples_before_filter == 0) ? 0 : (static_cast<double>(runtime_sum) / 5000);
 }
 
 double AdaptiveFilter::GetSampledSelectivity() {
