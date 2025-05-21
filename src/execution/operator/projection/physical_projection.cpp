@@ -5,7 +5,6 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
-#include <iostream>
 namespace duckdb {
 
 class ProjectionState : public OperatorState {
@@ -46,8 +45,6 @@ OperatorResultType PhysicalProjection::Execute(ExecutionContext &context, DataCh
 		auto &filter_state = state.filter_state->Cast<FilterState>();
 		auto &conjunction_state = filter_state.executor.GetStates()[0]->root_state->Cast<ConjunctionState>();
 		auto &adaptive_filter = conjunction_state.adaptive_filter;
-		std::cout << "Cost: " << adaptive_filter->GetSampledCost() << std::endl;
-		std::cout << "Selectivity: " << adaptive_filter->GetSampledSelectivity() << std::endl;
 
 		// TODO:
 		// 1. Get the cost and selectivity from the AdaptiveFilter

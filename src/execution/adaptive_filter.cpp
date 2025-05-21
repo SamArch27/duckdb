@@ -4,7 +4,6 @@
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/vector.hpp"
-
 namespace duckdb {
 
 AdaptiveFilter::AdaptiveFilter(const Expression &expr) : observe_interval(10), execute_interval(20), warmup(true) {
@@ -70,11 +69,11 @@ void AdaptiveFilter::EndFilter(AdaptiveFilterState state) {
 }
 
 double AdaptiveFilter::GetSampledCost() {
-	return (tuples_before_filter == 0) ? 0 : runtime_sum / tuples_before_filter;
+	return (tuples_before_filter == 0) ? 0 : static_cast<double>(runtime_sum) / tuples_before_filter;
 }
 
 double AdaptiveFilter::GetSampledSelectivity() {
-	return (tuples_before_filter == 0) ? 0 : tuples_after_filter / tuples_before_filter;
+	return (tuples_before_filter == 0) ? 0 : static_cast<double>(tuples_after_filter) / tuples_before_filter;
 }
 
 void AdaptiveFilter::AdaptRuntimeStatistics(double duration) {

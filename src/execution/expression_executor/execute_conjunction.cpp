@@ -83,6 +83,8 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 					false_sel->set_index(false_count++, temp_false->get_index(i));
 				}
 			}
+			filter_state.tuples_before_filter += tcount + fcount;
+			filter_state.tuples_after_filter += tcount;
 			current_count = tcount;
 			if (current_count == 0) {
 				break;
@@ -92,8 +94,6 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 				// iterations
 				current_sel = true_sel;
 			}
-			filter_state.tuples_before_filter += tcount + fcount;
-			filter_state.tuples_after_filter += tcount;
 		}
 		// adapt runtime statistics
 		state.adaptive_filter->EndFilter(filter_state);
