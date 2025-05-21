@@ -287,7 +287,8 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	auto &lowest_filter = new_project->children[0];
 	if (lowest_filter->type == LogicalOperatorType::LOGICAL_FILTER) {
 		auto &filter = lowest_filter->Cast<LogicalFilter>();
-		distinct_count = filter.GetDistinctValues();
+		// TODO: Use distinct count once we have implemented caching
+		// distinct_count = filter.GetDistinctValues();
 	}
 	int udf_filter_count = 0;
 

@@ -10,6 +10,8 @@
 
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/planner/expression.hpp"
+#include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/parallel/thread_context.hpp"
 
 namespace duckdb {
 
@@ -38,5 +40,20 @@ public:
 protected:
 	OperatorResultType ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
 	                                   GlobalOperatorState &gstate, OperatorState &state) const override;
+};
+
+class FilterState : public CachingOperatorState {
+public:
+	explicit FilterState(ExecutionContext &context, Expression &expr)
+	    : executor(context.client, expr), sel(STANDARD_VECTOR_SIZE) {
+	}
+
+	ExpressionExecutor executor;
+	SelectionVector sel;
+
+public:
+	void Finalize(const PhysicalOperator &op, ExecutionContext &context) override {
+		context.thread.profiler.Flush(op);
+	}
 };
 } // namespace duckdb

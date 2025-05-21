@@ -20,21 +20,6 @@ PhysicalFilter::PhysicalFilter(vector<LogicalType> types, vector<unique_ptr<Expr
 	}
 }
 
-class FilterState : public CachingOperatorState {
-public:
-	explicit FilterState(ExecutionContext &context, Expression &expr)
-	    : executor(context.client, expr), sel(STANDARD_VECTOR_SIZE) {
-	}
-
-	ExpressionExecutor executor;
-	SelectionVector sel;
-
-public:
-	void Finalize(const PhysicalOperator &op, ExecutionContext &context) override {
-		context.thread.profiler.Flush(op);
-	}
-};
-
 unique_ptr<OperatorState> PhysicalFilter::GetOperatorState(ExecutionContext &context) const {
 	return make_uniq<FilterState>(context, *expression);
 }

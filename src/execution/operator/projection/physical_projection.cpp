@@ -1,8 +1,11 @@
 #include "duckdb/execution/operator/projection/physical_projection.hpp"
+#include "duckdb/execution/operator/filter/physical_filter.hpp"
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include <iostream>
 namespace duckdb {
 
 class ProjectionState : public OperatorState {
@@ -13,10 +16,12 @@ public:
 		if (filter) {
 			intermediate_chunk = make_uniq<DataChunk>();
 			intermediate_chunk->Initialize(Allocator::DefaultAllocator(), filter->GetTypes());
+			filter_state = filter->GetOperatorState(context);
 		}
 	}
 
 	unique_ptr<DataChunk> intermediate_chunk;
+	unique_ptr<OperatorState> filter_state;
 	ExpressionExecutor executor;
 
 public:
@@ -36,7 +41,20 @@ OperatorResultType PhysicalProjection::Execute(ExecutionContext &context, DataCh
 	auto &state = state_p.Cast<ProjectionState>();
 
 	if (filter) {
-		filter->Execute(context, input, *(state.intermediate_chunk), gstate, *filter->GetOperatorState(context));
+		filter->Execute(context, input, *(state.intermediate_chunk), gstate, *state.filter_state);
+
+		auto &filter_state = state.filter_state->Cast<FilterState>();
+		auto &conjunction_state = filter_state.executor.GetStates()[0]->root_state->Cast<ConjunctionState>();
+		auto &adaptive_filter = conjunction_state.adaptive_filter;
+		std::cout << "Cost: " << adaptive_filter->GetSampledCost() << std::endl;
+		std::cout << "Selectivity: " << adaptive_filter->GetSampledSelectivity() << std::endl;
+
+		// TODO:
+		// 1. Get the cost and selectivity from the AdaptiveFilter
+		// 2. Plug it into each formula
+		// 3. Take the min
+		// 4. Project that value
+
 		state.executor.Execute(*(state.intermediate_chunk), chunk);
 		return OperatorResultType::NEED_MORE_INPUT;
 	}

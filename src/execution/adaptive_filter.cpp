@@ -65,15 +65,16 @@ void AdaptiveFilter::EndFilter(AdaptiveFilterState state) {
 	auto end_time = high_resolution_clock::now();
 	tuples_before_filter += state.tuples_before_filter;
 	tuples_after_filter += state.tuples_after_filter;
-	AdaptRuntimeStatistics(duration_cast<duration<double>>(end_time - state.start_time).count());
+	std::chrono::duration<double, std::nano> diff = end_time - state.start_time;
+	AdaptRuntimeStatistics(diff.count());
 }
 
-double AdaptiveFilter::getSampledCost() {
-	return runtime_sum / tuples_before_filter;
+double AdaptiveFilter::GetSampledCost() {
+	return (tuples_before_filter == 0) ? 0 : runtime_sum / tuples_before_filter;
 }
 
-double AdaptiveFilter::getSampledSelectivity() {
-	return tuples_after_filter / tuples_before_filter;
+double AdaptiveFilter::GetSampledSelectivity() {
+	return (tuples_before_filter == 0) ? 0 : tuples_after_filter / tuples_before_filter;
 }
 
 void AdaptiveFilter::AdaptRuntimeStatistics(double duration) {

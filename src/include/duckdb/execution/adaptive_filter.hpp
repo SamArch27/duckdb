@@ -38,8 +38,8 @@ public:
 		return is_lowest_udf_filter;
 	}
 
-	double getSampledCost(void);
-	double getSampledSelectivity(void);
+	double GetSampledCost(void);
+	double GetSampledSelectivity(void);
 
 private:
 	bool disable_permutations = false;
