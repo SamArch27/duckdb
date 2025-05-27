@@ -330,7 +330,7 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::ColumnExpression(const py::ar
 		}
 		column_names.push_back(qualified_name.name);
 	} else {
-		for (auto &part : names) {
+		for (const auto &part : names) {
 			column_names.push_back(std::string(py::str(part)));
 		}
 	}
@@ -362,7 +362,7 @@ shared_ptr<DuckDBPyExpression> DuckDBPyExpression::LambdaExpression(const py::ob
 		// LambdaExpression(lhs=(<item>, <item>, <item>))
 		auto lhs_tuple = py::cast<py::tuple>(lhs_p);
 		vector<unique_ptr<ParsedExpression>> children;
-		for (auto &item : lhs_tuple) {
+		for (const auto &item : lhs_tuple) {
 			unique_ptr<ParsedExpression> column;
 			if (py::isinstance<DuckDBPyExpression>(item)) {
 				// 'item' is already an Expression, check its type and use it
