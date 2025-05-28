@@ -400,28 +400,12 @@ PythonObjectType GetPythonObjectType(py::handle &ele) {
 
 	if (ele.is_none()) {
 		return PythonObjectType::None;
-	} else if (ele.is(import_cache.pandas.NaT())) {
-		return PythonObjectType::None;
-	} else if (ele.is(import_cache.pandas.NA())) {
-		return PythonObjectType::None;
 	} else if (py::isinstance<py::bool_>(ele)) {
 		return PythonObjectType::Bool;
 	} else if (py::isinstance<py::int_>(ele)) {
 		return PythonObjectType::Integer;
 	} else if (py::isinstance<py::float_>(ele)) {
 		return PythonObjectType::Float;
-	} else if (py::isinstance(ele, import_cache.decimal.Decimal())) {
-		return PythonObjectType::Decimal;
-	} else if (py::isinstance(ele, import_cache.uuid.UUID())) {
-		return PythonObjectType::Uuid;
-	} else if (py::isinstance(ele, import_cache.datetime.datetime())) {
-		return PythonObjectType::Datetime;
-	} else if (py::isinstance(ele, import_cache.datetime.time())) {
-		return PythonObjectType::Time;
-	} else if (py::isinstance(ele, import_cache.datetime.date())) {
-		return PythonObjectType::Date;
-	} else if (py::isinstance(ele, import_cache.datetime.timedelta())) {
-		return PythonObjectType::Timedelta;
 	} else if (py::isinstance<py::str>(ele)) {
 		return PythonObjectType::String;
 	} else if (py::isinstance<py::bytearray>(ele)) {
@@ -436,6 +420,22 @@ PythonObjectType GetPythonObjectType(py::handle &ele) {
 		return PythonObjectType::Tuple;
 	} else if (py::isinstance<py::dict>(ele)) {
 		return PythonObjectType::Dict;
+	} else if (ele.is(import_cache.pandas.NaT())) {
+		return PythonObjectType::None;
+	} else if (ele.is(import_cache.pandas.NA())) {
+		return PythonObjectType::None;
+	} else if (py::isinstance(ele, import_cache.decimal.Decimal())) {
+		return PythonObjectType::Decimal;
+	} else if (py::isinstance(ele, import_cache.uuid.UUID())) {
+		return PythonObjectType::Uuid;
+	} else if (py::isinstance(ele, import_cache.datetime.datetime())) {
+		return PythonObjectType::Datetime;
+	} else if (py::isinstance(ele, import_cache.datetime.time())) {
+		return PythonObjectType::Time;
+	} else if (py::isinstance(ele, import_cache.datetime.date())) {
+		return PythonObjectType::Date;
+	} else if (py::isinstance(ele, import_cache.datetime.timedelta())) {
+		return PythonObjectType::Timedelta;
 	} else if (ele.is(import_cache.numpy.ma.masked())) {
 		return PythonObjectType::None;
 	} else if (py::isinstance(ele, import_cache.numpy.ndarray())) {
