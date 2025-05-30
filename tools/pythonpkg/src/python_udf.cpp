@@ -311,8 +311,12 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
 		// auto start = std::chrono::high_resolution_clock::now();
 
+		// TODO:
+		// 1. Look at FlattenDependentJoin to introduce a FIRST aggregate expression here
+		// 2. Check the cache for found values
+		// 3. Insert into the cache for the result vector
 		static auto cache = make_uniq<GroupedAggregateHashTable>(
-		    state.GetContext(), BufferAllocator::Get(state.GetContext()), input.GetTypes());
+		    state.GetContext(), BufferAllocator::Get(state.GetContext()), input.GetTypes() /*, result.GetTypes() */);
 
 		py::gil_scoped_acquire gil;
 
