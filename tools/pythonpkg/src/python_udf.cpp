@@ -4,6 +4,7 @@
 #include "duckdb_python/pytype.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pandas/pandas_scan.hpp"
+#include "duckdb/common/allocator.hpp"
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
@@ -16,9 +17,10 @@
 #include "duckdb_python/arrow/arrow_export_utils.hpp"
 #include "duckdb/common/types/arrow_aux_data.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
+#include "duckdb/execution/aggregate_hashtable.hpp"
 #include "duckdb/function/table/arrow/arrow_duck_schema.hpp"
 #include "duckdb_python/python_conversion.hpp"
-
+#include <chrono>
 namespace duckdb {
 
 static py::list ConvertToSingleBatch(vector<LogicalType> &types, vector<string> &names, DataChunk &input,
@@ -171,6 +173,8 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
+		// auto start = std::chrono::high_resolution_clock::now();
+
 		py::gil_scoped_acquire gil;
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
@@ -222,6 +226,7 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 
 		// Call the function
 		auto ret = PyObject_CallObject(function, column_list.ptr());
+
 		bool exception_occurred = false;
 		if (ret == nullptr && PyErr_Occurred()) {
 			exception_occurred = true;
@@ -291,6 +296,9 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 		if (input_size == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
 		}
+		// auto stop = std::chrono::high_resolution_clock::now();
+		// auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+		// std::cout << "UDF call took: " << duration.count() << " micros" << std::endl;
 	};
 	return func;
 }
@@ -301,6 +309,11 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
+		// auto start = std::chrono::high_resolution_clock::now();
+
+		static auto cache = make_uniq<GroupedAggregateHashTable>(
+		    state.GetContext(), BufferAllocator::Get(state.GetContext()), input.GetTypes());
+
 		py::gil_scoped_acquire gil;
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
@@ -348,6 +361,9 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		if (input.size() == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
 		}
+		// auto stop = std::chrono::high_resolution_clock::now();
+		// auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+		// std::cout << "UDF call took: " << duration.count() << " micros" << std::endl;
 	};
 	return func;
 }
