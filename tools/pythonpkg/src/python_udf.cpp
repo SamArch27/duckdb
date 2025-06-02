@@ -25,6 +25,7 @@
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb_python/python_conversion.hpp"
 #include <chrono>
+#include <iostream>
 namespace duckdb {
 
 static py::list ConvertToSingleBatch(vector<LogicalType> &types, vector<string> &names, DataChunk &input,
@@ -314,7 +315,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
-		// auto start = std::chrono::high_resolution_clock::now();
+		auto start = std::chrono::high_resolution_clock::now();
 
 		auto make_cache = [](DataChunk &input, ExpressionState &state,
 		                     Vector &result) -> unique_ptr<GroupedAggregateHashTable> {
@@ -385,9 +386,14 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		if (input.size() == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
 		}
-		// auto stop = std::chrono::high_resolution_clock::now();
-		// auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
-		// std::cout << "UDF call took: " << duration.count() << " micros" << std::endl;
+
+		// TODO:
+		// 1. Convert Vector to Chunk format
+		// cache->AddChunk(input, result, AggregateType::NON_DISTINCT);
+
+		auto stop = std::chrono::high_resolution_clock::now();
+		auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+		std::cout << "UDF call took: " << duration.count() << " micros" << std::endl;
 	};
 	return func;
 }
