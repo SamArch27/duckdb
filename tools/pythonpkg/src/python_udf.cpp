@@ -18,7 +18,11 @@
 #include "duckdb/common/types/arrow_aux_data.hpp"
 #include "duckdb/parser/tableref/table_function_ref.hpp"
 #include "duckdb/execution/aggregate_hashtable.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/bound_aggregate_expression.hpp"
 #include "duckdb/function/table/arrow/arrow_duck_schema.hpp"
+#include "duckdb/function/aggregate/distributive_function_utils.hpp"
+#include "duckdb/function/function_binder.hpp"
 #include "duckdb_python/python_conversion.hpp"
 #include <chrono>
 namespace duckdb {
@@ -306,17 +310,33 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptionHandling exception_handling,
                                               const ClientProperties &client_properties,
                                               FunctionNullHandling null_handling) {
+
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
 		// auto start = std::chrono::high_resolution_clock::now();
 
+		auto make_cache = [](DataChunk &input, ExpressionState &state,
+		                     Vector &result) -> unique_ptr<GroupedAggregateHashTable> {
+			auto input_types = input.GetTypes();
+			auto output_types = vector<LogicalType>();
+			output_types.push_back(result.GetType());
+
+			auto first_agg = FirstFunctionGetter::GetFunction(result.GetType());
+			auto args = vector<unique_ptr<Expression>>();
+			args.push_back(make_uniq<BoundReferenceExpression>(result.GetType(), 0));
+			auto agg_expr = make_uniq<BoundAggregateExpression>(first_agg, std::move(args), nullptr, nullptr,
+			                                                    AggregateType::NON_DISTINCT);
+			auto aggregates = vector<BoundAggregateExpression *>();
+			aggregates.push_back(agg_expr.get());
+			return make_uniq<GroupedAggregateHashTable>(state.GetContext(), BufferAllocator::Get(state.GetContext()),
+			                                            input_types, output_types, aggregates);
+		};
+
+		static auto cache = make_cache(input, state, result);
+
 		// TODO:
-		// 1. Look at FlattenDependentJoin to introduce a FIRST aggregate expression here
-		// 2. Check the cache for found values
-		// 3. Insert into the cache for the result vector
-		static auto cache = make_uniq<GroupedAggregateHashTable>(
-		    state.GetContext(), BufferAllocator::Get(state.GetContext()), input.GetTypes() /*, result.GetTypes() */);
+		// 1. Use the cache
 
 		py::gil_scoped_acquire gil;
 
