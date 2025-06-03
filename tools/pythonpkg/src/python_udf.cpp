@@ -315,8 +315,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
-		auto start = std::chrono::high_resolution_clock::now();
-
 		auto make_cache = [](DataChunk &input, ExpressionState &state,
 		                     Vector &result) -> unique_ptr<GroupedAggregateHashTable> {
 			auto input_types = input.GetTypes();
@@ -341,9 +339,27 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			state.GetContext().db->udf_cache = make_cache(input, state, result);
 		}
 
+		auto ht_probe_before = std::chrono::high_resolution_clock::now();
+
+		// Fetch from the cache
+		DataChunk cached_payload;
+		auto result_type = vector<LogicalType>(1, result.GetType());
+		cached_payload.Initialize(Allocator::DefaultAllocator(), result_type);
+		state.GetContext().db->udf_cache->FetchAggregates(input, cached_payload);
+
+		auto ht_probe_after = std::chrono::high_resolution_clock::now();
+
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
+		auto start = std::chrono::high_resolution_clock::now();
+		idx_t rows_cached = 0;
 		for (idx_t row = 0; row < input.size(); row++) {
+			auto cached_value = cached_payload.GetValue(0, row);
+			if (!cached_value.IsNull()) {
+				++rows_cached;
+				result.SetValue(row, cached_value);
+				continue;
+			}
 
 			auto bundled_parameters = py::tuple((int)input.ColumnCount());
 			bool contains_null = false;
@@ -386,16 +402,29 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		if (input.size() == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
 		}
+		auto stop = std::chrono::high_resolution_clock::now();
+
+		auto ht_build_before = std::chrono::high_resolution_clock::now();
 
 		DataChunk payload;
-		auto result_type = vector<LogicalType>(1, result.GetType());
 		payload.Initialize(Allocator::DefaultAllocator(), result_type);
+		payload.SetCardinality(input);
 		payload.data[0].Reference(result);
+
 		state.GetContext().db->udf_cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
 
-		auto stop = std::chrono::high_resolution_clock::now();
+		auto ht_build_after = std::chrono::high_resolution_clock::now();
+
 		auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
+		auto probe_duration = std::chrono::duration_cast<std::chrono::microseconds>(ht_probe_after - ht_probe_before);
+		auto build_duration = std::chrono::duration_cast<std::chrono::microseconds>(ht_build_after - ht_build_before);
+
+		std::cout << "Cached: " << rows_cached << " out of " << input.size() << std::endl;
+		std::cout << "HT Probe took: " << probe_duration.count() << " micros" << std::endl;
+		std::cout << "HT Build took: " << build_duration.count() << " micros" << std::endl;
 		std::cout << "UDF call took: " << duration.count() << " micros" << std::endl;
+		std::cout << "Total took: " << duration.count() + probe_duration.count() + build_duration.count() << " micros"
+		          << std::endl;
 	};
 	return func;
 }
