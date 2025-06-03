@@ -334,12 +334,12 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			                                            input_types, output_types, aggregates);
 		};
 
-		static auto cache = make_cache(input, state, result);
-
-		// TODO:
-		// 1. Use the cache
-
 		py::gil_scoped_acquire gil;
+
+		// Initialize the cache if it isn't already
+		if (state.GetContext().db->udf_cache == nullptr) {
+			state.GetContext().db->udf_cache = make_cache(input, state, result);
+		}
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
@@ -387,9 +387,11 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
 		}
 
-		// TODO:
-		// 1. Convert Vector to Chunk format
-		// cache->AddChunk(input, result, AggregateType::NON_DISTINCT);
+		DataChunk payload;
+		auto result_type = vector<LogicalType>(1, result.GetType());
+		payload.Initialize(Allocator::DefaultAllocator(), result_type);
+		payload.data[0].Reference(result);
+		state.GetContext().db->udf_cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
 
 		auto stop = std::chrono::high_resolution_clock::now();
 		auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);

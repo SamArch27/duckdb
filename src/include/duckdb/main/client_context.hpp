@@ -60,6 +60,8 @@ struct PendingQueryParameters {
 	bool allow_stream_result = false;
 };
 
+class GroupedAggregateHashTable;
+
 //! The ClientContext holds information relevant to the current client session
 //! during execution
 class ClientContext : public enable_shared_from_this<ClientContext> {

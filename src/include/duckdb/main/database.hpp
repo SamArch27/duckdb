@@ -15,6 +15,7 @@
 #include "duckdb/main/extension_install_info.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/main/valid_checker.hpp"
+#include "duckdb/execution/aggregate_hashtable.hpp"
 
 namespace duckdb {
 class BufferManager;
@@ -46,6 +47,7 @@ public:
 	DUCKDB_API ~DatabaseInstance();
 
 	DBConfig config;
+	unique_ptr<GroupedAggregateHashTable> udf_cache;
 
 public:
 	BufferPool &GetBufferPool() const;
