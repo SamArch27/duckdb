@@ -339,92 +339,73 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			state.GetContext().db->udf_cache = make_cache(input, state, result);
 		}
 
-		auto ht_probe_before = std::chrono::high_resolution_clock::now();
-
-		// Fetch from the cache
+		// Fetch from the UDF cache
 		DataChunk cached_payload;
 		auto result_type = vector<LogicalType>(1, result.GetType());
 		cached_payload.Initialize(Allocator::DefaultAllocator(), result_type);
+		cached_payload.SetCardinality(input);
+		cached_payload.data[0].Reference(result);
 		state.GetContext().db->udf_cache->FetchAggregates(input, cached_payload);
-
-		auto ht_probe_after = std::chrono::high_resolution_clock::now();
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
-		auto start = std::chrono::high_resolution_clock::now();
-		idx_t rows_cached = 0;
-		for (idx_t row = 0; row < input.size(); row++) {
-			auto cached_value = cached_payload.GetValue(0, row);
-			if (!cached_value.IsNull()) {
-				++rows_cached;
-				result.SetValue(row, cached_value);
-				continue;
-			}
+		bool all_valid = result.validity.AllValid();
 
-			auto bundled_parameters = py::tuple((int)input.ColumnCount());
-			bool contains_null = false;
-			for (idx_t i = 0; i < input.ColumnCount(); i++) {
-				// Fill the tuple with the arguments for this row
-				auto &column = input.data[i];
-				auto value = column.GetValue(row);
-				if (value.IsNull() && default_null_handling) {
-					contains_null = true;
-					break;
+		if (!all_valid) {
+			for (idx_t row = 0; row < input.size(); row++) {
+				if (result.validity.RowIsValid(row)) {
+					continue;
 				}
-				bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
-			}
-			if (contains_null) {
-				// Immediately insert None, no need to call the function
-				FlatVector::SetNull(result, row, true);
-				continue;
-			}
 
-			// Call the function
-			auto ret = PyObject_CallObject(function, bundled_parameters.ptr());
-			if (ret == nullptr && PyErr_Occurred()) {
-				if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-					auto exception = py::error_already_set();
-					throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-					                            exception.what());
-				} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
-					PyErr_Clear();
+				auto bundled_parameters = py::tuple((int)input.ColumnCount());
+				bool contains_null = false;
+				for (idx_t i = 0; i < input.ColumnCount(); i++) {
+					// Fill the tuple with the arguments for this row
+					auto &column = input.data[i];
+					auto value = column.GetValue(row);
+					if (value.IsNull() && default_null_handling) {
+						contains_null = true;
+						break;
+					}
+					bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
+				}
+				if (contains_null) {
+					// Immediately insert None, no need to call the function
 					FlatVector::SetNull(result, row, true);
 					continue;
-				} else {
-					throw NotImplementedException("Exception handling type not implemented");
 				}
-			} else if ((!ret || ret == Py_None) && default_null_handling) {
-				throw InvalidInputException(NullHandlingError());
+
+				// Call the function
+				auto ret = PyObject_CallObject(function, bundled_parameters.ptr());
+				if (ret == nullptr && PyErr_Occurred()) {
+					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+						auto exception = py::error_already_set();
+						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+						                            exception.what());
+					} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
+						PyErr_Clear();
+						FlatVector::SetNull(result, row, true);
+						continue;
+					} else {
+						throw NotImplementedException("Exception handling type not implemented");
+					}
+				} else if ((!ret || ret == Py_None) && default_null_handling) {
+					throw InvalidInputException(NullHandlingError());
+				}
+				TransformPythonObject(ret, result, row);
 			}
-			TransformPythonObject(ret, result, row);
 		}
 
 		if (input.size() == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
 		}
-		auto stop = std::chrono::high_resolution_clock::now();
 
-		auto ht_build_before = std::chrono::high_resolution_clock::now();
-
-		DataChunk payload;
-		payload.Initialize(Allocator::DefaultAllocator(), result_type);
-		payload.SetCardinality(input);
-		payload.data[0].Reference(result);
-
-		state.GetContext().db->udf_cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
-
-		auto ht_build_after = std::chrono::high_resolution_clock::now();
-
-		auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
-		auto probe_duration = std::chrono::duration_cast<std::chrono::microseconds>(ht_probe_after - ht_probe_before);
-		auto build_duration = std::chrono::duration_cast<std::chrono::microseconds>(ht_build_after - ht_build_before);
-
-		std::cout << "Cached: " << rows_cached << " out of " << input.size() << std::endl;
-		std::cout << "HT Probe took: " << probe_duration.count() << " micros" << std::endl;
-		std::cout << "HT Build took: " << build_duration.count() << " micros" << std::endl;
-		std::cout << "UDF call took: " << duration.count() << " micros" << std::endl;
-		std::cout << "Total took: " << duration.count() + probe_duration.count() + build_duration.count() << " micros"
-		          << std::endl;
+		// skip inserting into the UDF cache if there are no new values
+		if (!all_valid) {
+			// reuse the existing result buffer
+			cached_payload.data[0].Reference(result);
+			state.GetContext().db->udf_cache->AddChunk(input, cached_payload, AggregateType::NON_DISTINCT);
+		}
 	};
 	return func;
 }
