@@ -339,9 +339,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			state.GetContext().db->udf_cache = make_cache(input, state, result);
 		}
 
-		std::cout << "Printing input: " << std::endl;
-		std::cout << input.ToString() << std::endl;
-
 		// Fetch from the UDF cache
 		DataChunk cached_payload;
 		auto result_type = vector<LogicalType>(1, result.GetType());
@@ -350,15 +347,10 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		cached_payload.data[0].Reference(result);
 		state.GetContext().db->udf_cache->FetchAggregates(input, cached_payload);
 
-		std::cout << "Printing result from cache: " << std::endl;
-		std::cout << cached_payload.ToString() << std::endl;
-
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
 		for (idx_t row = 0; row < input.size(); row++) {
-			if (!cached_payload.data[0].GetValue(row).IsNull()) {
-				result.SetValue(row, cached_payload.data[0].GetValue(row));
-				std::cout << "Setting value from cache! Continuing!" << std::endl;
+			if (!FlatVector::IsNull(cached_payload.data[0], row)) {
 				continue;
 			}
 
@@ -401,11 +393,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		}
 
 		// reuse the existing result buffer
-		cached_payload.data[0].Reference(result);
-
-		std::cout << "Printing buffer inserting into cache: " << std::endl;
-		std::cout << cached_payload.ToString() << std::endl;
-
 		state.GetContext().db->udf_cache->AddChunk(input, cached_payload, AggregateType::NON_DISTINCT);
 
 		if (input.size() == 1) {
