@@ -339,6 +339,9 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			state.GetContext().db->udf_cache = make_cache(input, state, result);
 		}
 
+		std::cout << "Printing input: " << std::endl;
+		std::cout << input.ToString() << std::endl;
+
 		// Fetch from the UDF cache
 		DataChunk cached_payload;
 		auto result_type = vector<LogicalType>(1, result.GetType());
@@ -347,64 +350,66 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		cached_payload.data[0].Reference(result);
 		state.GetContext().db->udf_cache->FetchAggregates(input, cached_payload);
 
+		std::cout << "Printing result from cache: " << std::endl;
+		std::cout << cached_payload.ToString() << std::endl;
+
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
-		bool all_valid = result.validity.AllValid();
+		for (idx_t row = 0; row < input.size(); row++) {
+			if (!cached_payload.data[0].GetValue(row).IsNull()) {
+				result.SetValue(row, cached_payload.data[0].GetValue(row));
+				std::cout << "Setting value from cache! Continuing!" << std::endl;
+				continue;
+			}
 
-		if (!all_valid) {
-			for (idx_t row = 0; row < input.size(); row++) {
-				if (result.validity.RowIsValid(row)) {
-					continue;
+			auto bundled_parameters = py::tuple((int)input.ColumnCount());
+			bool contains_null = false;
+			for (idx_t i = 0; i < input.ColumnCount(); i++) {
+				// Fill the tuple with the arguments for this row
+				auto &column = input.data[i];
+				auto value = column.GetValue(row);
+				if (value.IsNull() && default_null_handling) {
+					contains_null = true;
+					break;
 				}
+				bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
+			}
+			if (contains_null) {
+				// Immediately insert None, no need to call the function
+				FlatVector::SetNull(result, row, true);
+				continue;
+			}
 
-				auto bundled_parameters = py::tuple((int)input.ColumnCount());
-				bool contains_null = false;
-				for (idx_t i = 0; i < input.ColumnCount(); i++) {
-					// Fill the tuple with the arguments for this row
-					auto &column = input.data[i];
-					auto value = column.GetValue(row);
-					if (value.IsNull() && default_null_handling) {
-						contains_null = true;
-						break;
-					}
-					bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
-				}
-				if (contains_null) {
-					// Immediately insert None, no need to call the function
+			// Call the function
+			auto ret = PyObject_CallObject(function, bundled_parameters.ptr());
+			if (ret == nullptr && PyErr_Occurred()) {
+				if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+					auto exception = py::error_already_set();
+					throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+					                            exception.what());
+				} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
+					PyErr_Clear();
 					FlatVector::SetNull(result, row, true);
 					continue;
+				} else {
+					throw NotImplementedException("Exception handling type not implemented");
 				}
-
-				// Call the function
-				auto ret = PyObject_CallObject(function, bundled_parameters.ptr());
-				if (ret == nullptr && PyErr_Occurred()) {
-					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-						auto exception = py::error_already_set();
-						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-						                            exception.what());
-					} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
-						PyErr_Clear();
-						FlatVector::SetNull(result, row, true);
-						continue;
-					} else {
-						throw NotImplementedException("Exception handling type not implemented");
-					}
-				} else if ((!ret || ret == Py_None) && default_null_handling) {
-					throw InvalidInputException(NullHandlingError());
-				}
-				TransformPythonObject(ret, result, row);
+			} else if ((!ret || ret == Py_None) && default_null_handling) {
+				throw InvalidInputException(NullHandlingError());
 			}
+			TransformPythonObject(ret, result, row);
 		}
+
+		// reuse the existing result buffer
+		cached_payload.data[0].Reference(result);
+
+		std::cout << "Printing buffer inserting into cache: " << std::endl;
+		std::cout << cached_payload.ToString() << std::endl;
+
+		state.GetContext().db->udf_cache->AddChunk(input, cached_payload, AggregateType::NON_DISTINCT);
 
 		if (input.size() == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
-		}
-
-		// skip inserting into the UDF cache if there are no new values
-		if (!all_valid) {
-			// reuse the existing result buffer
-			cached_payload.data[0].Reference(result);
-			state.GetContext().db->udf_cache->AddChunk(input, cached_payload, AggregateType::NON_DISTINCT);
 		}
 	};
 	return func;
