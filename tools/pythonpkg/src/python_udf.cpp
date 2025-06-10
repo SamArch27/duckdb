@@ -5,6 +5,7 @@
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pandas/pandas_scan.hpp"
 #include "duckdb/common/allocator.hpp"
+#include "duckdb/common/unordered_map.hpp"
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
@@ -349,8 +350,10 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
+		idx_t hit_count = 0;
 		for (idx_t row = 0; row < input.size(); row++) {
 			if (!FlatVector::IsNull(cached_payload.data[0], row)) {
+				++hit_count;
 				continue;
 			}
 
@@ -392,8 +395,9 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			TransformPythonObject(ret, result, row);
 		}
 
-		// reuse the existing result buffer
-		state.GetContext().db->udf_cache->AddChunk(input, cached_payload, AggregateType::NON_DISTINCT);
+		if (hit_count != input.size()) {
+			state.GetContext().db->udf_cache->AddChunk(input, cached_payload, AggregateType::NON_DISTINCT);
+		}
 
 		if (input.size() == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
