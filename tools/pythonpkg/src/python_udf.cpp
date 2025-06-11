@@ -5,7 +5,7 @@
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pandas/pandas_scan.hpp"
 #include "duckdb/common/allocator.hpp"
-#include "duckdb/common/unordered_map.hpp"
+#include "duckdb/common/row_operations/row_operations.hpp"
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
 #include "duckdb/common/arrow/arrow_wrapper.hpp"
@@ -336,68 +336,76 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		py::gil_scoped_acquire gil;
 
 		// Initialize the cache if it isn't already
-		if (state.GetContext().db->udf_cache == nullptr) {
-			state.GetContext().db->udf_cache = make_cache(input, state, result);
+		auto &cache = state.GetContext().db->udf_cache;
+		if (cache == nullptr) {
+			cache = make_cache(input, state, result);
 		}
 
-		// Fetch from the UDF cache
-		DataChunk cached_payload;
-		auto result_type = vector<LogicalType>(1, result.GetType());
-		cached_payload.Initialize(Allocator::DefaultAllocator(), result_type);
-		cached_payload.SetCardinality(input);
-		cached_payload.data[0].Reference(result);
-		state.GetContext().db->udf_cache->FetchAggregates(input, cached_payload);
+		// Fetch the groups from the HT
+		Vector addresses(LogicalType::POINTER);
+		SelectionVector misses(STANDARD_VECTOR_SIZE);
+		idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
-		idx_t hit_count = 0;
-		for (idx_t row = 0; row < input.size(); row++) {
-			if (!FlatVector::IsNull(cached_payload.data[0], row)) {
-				++hit_count;
-				continue;
-			}
-
-			auto bundled_parameters = py::tuple((int)input.ColumnCount());
-			bool contains_null = false;
-			for (idx_t i = 0; i < input.ColumnCount(); i++) {
-				// Fill the tuple with the arguments for this row
-				auto &column = input.data[i];
-				auto value = column.GetValue(row);
-				if (value.IsNull() && default_null_handling) {
-					contains_null = true;
-					break;
+		// invoke the UDF for each miss
+		if (miss_count > 0) {
+			for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
+				idx_t row = misses[miss_idx];
+				auto bundled_parameters = py::tuple((int)input.ColumnCount());
+				bool contains_null = false;
+				for (idx_t i = 0; i < input.ColumnCount(); i++) {
+					// Fill the tuple with the arguments for this row
+					auto &column = input.data[i];
+					auto value = column.GetValue(row);
+					if (value.IsNull() && default_null_handling) {
+						contains_null = true;
+						break;
+					}
+					bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
 				}
-				bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
-			}
-			if (contains_null) {
-				// Immediately insert None, no need to call the function
-				FlatVector::SetNull(result, row, true);
-				continue;
-			}
-
-			// Call the function
-			auto ret = PyObject_CallObject(function, bundled_parameters.ptr());
-			if (ret == nullptr && PyErr_Occurred()) {
-				if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-					auto exception = py::error_already_set();
-					throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-					                            exception.what());
-				} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
-					PyErr_Clear();
+				if (contains_null) {
+					// Immediately insert None, no need to call the function
 					FlatVector::SetNull(result, row, true);
 					continue;
-				} else {
-					throw NotImplementedException("Exception handling type not implemented");
 				}
-			} else if ((!ret || ret == Py_None) && default_null_handling) {
-				throw InvalidInputException(NullHandlingError());
+
+				// Call the function
+				auto ret = PyObject_CallObject(function, bundled_parameters.ptr());
+				if (ret == nullptr && PyErr_Occurred()) {
+					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+						auto exception = py::error_already_set();
+						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+						                            exception.what());
+					} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
+						PyErr_Clear();
+						FlatVector::SetNull(result, row, true);
+						continue;
+					} else {
+						throw NotImplementedException("Exception handling type not implemented");
+					}
+				} else if ((!ret || ret == Py_None) && default_null_handling) {
+					throw InvalidInputException(NullHandlingError());
+				}
+				TransformPythonObject(ret, result, row);
 			}
-			TransformPythonObject(ret, result, row);
 		}
 
-		if (hit_count != input.size()) {
-			state.GetContext().db->udf_cache->AddChunk(input, cached_payload, AggregateType::NON_DISTINCT);
+		// Reference the result vector using our DataChunk
+		DataChunk payload;
+		auto result_type = vector<LogicalType>(1, result.GetType());
+		payload.Initialize(Allocator::DefaultAllocator(), result_type);
+		payload.SetCardinality(input);
+		payload.data[0].Reference(result);
+
+		// Load the new values into the cache (if there are any)
+		if (miss_count > 0) {
+			cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
 		}
+
+		// Fetch the aggregate result from the cache
+		RowOperationsState row_state(*cache->GetAggregateAllocator());
+		RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
 
 		if (input.size() == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);

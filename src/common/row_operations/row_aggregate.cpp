@@ -99,7 +99,7 @@ void RowOperations::CombineStates(RowOperationsState &state, TupleDataLayout &la
 	VectorOperations::AddInPlace(targets, -UnsafeNumericCast<int64_t>(offset), count);
 }
 
-void RowOperations::FinalizeStates(RowOperationsState &state, TupleDataLayout &layout, Vector &addresses,
+void RowOperations::FinalizeStates(RowOperationsState &state, const TupleDataLayout &layout, Vector &addresses,
                                    DataChunk &result, idx_t aggr_idx) {
 	// Copy the addresses
 	Vector addresses_copy(LogicalType::POINTER);

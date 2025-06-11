@@ -67,8 +67,8 @@ struct RowOperations {
 	static void CombineStates(RowOperationsState &state, TupleDataLayout &layout, Vector &sources, Vector &targets,
 	                          idx_t count);
 	//! finalize - unaligned addresses, updated
-	static void FinalizeStates(RowOperationsState &state, TupleDataLayout &layout, Vector &addresses, DataChunk &result,
-	                           idx_t aggr_idx);
+	static void FinalizeStates(RowOperationsState &state, const TupleDataLayout &layout, Vector &addresses,
+	                           DataChunk &result, idx_t aggr_idx);
 
 	//===--------------------------------------------------------------------===//
 	// Read/Write Operators
