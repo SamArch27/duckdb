@@ -142,6 +142,10 @@ void GroupedAggregateHashTable::Repartition() {
 	old->Repartition(context, *partitioned_data);
 }
 
+ArenaAllocator &GroupedAggregateHashTable::GetAggregateAllocatorRef() {
+	return *aggregate_allocator;
+}
+
 shared_ptr<ArenaAllocator> GroupedAggregateHashTable::GetAggregateAllocator() {
 	return aggregate_allocator;
 }

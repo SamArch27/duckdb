@@ -95,6 +95,8 @@ public:
 	unique_ptr<PartitionedTupleData> AcquirePartitionedData();
 	void Abandon();
 	void Repartition();
+
+	ArenaAllocator &GetAggregateAllocatorRef();
 	shared_ptr<ArenaAllocator> GetAggregateAllocator();
 
 	//! Resize the HT to the specified size. Must be larger than the current size.

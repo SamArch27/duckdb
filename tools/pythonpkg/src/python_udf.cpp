@@ -337,19 +337,20 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 		// Initialize the cache if it isn't already
 		auto &cache = state.GetContext().db->udf_cache;
+		auto &misses = state.GetContext().db->udf_misses;
 		if (cache == nullptr) {
 			cache = make_cache(input, state, result);
+			misses.Initialize();
 		}
 
 		// Fetch the groups from the HT
 		Vector addresses(LogicalType::POINTER);
-		SelectionVector misses(STANDARD_VECTOR_SIZE);
 		idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
 		// invoke the UDF for each miss
-		if (miss_count > 0) {
+		if (miss_count != 0) {
 			for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
 				idx_t row = misses[miss_idx];
 				auto bundled_parameters = py::tuple((int)input.ColumnCount());
@@ -399,13 +400,15 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		payload.data[0].Reference(result);
 
 		// Load the new values into the cache (if there are any)
-		if (miss_count > 0) {
+		if (miss_count != 0) {
 			cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
 		}
 
 		// Fetch the aggregate result from the cache
-		RowOperationsState row_state(*cache->GetAggregateAllocator());
+		RowOperationsState row_state(cache->GetAggregateAllocatorRef());
 		RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
+
+		auto after_agg = std::chrono::high_resolution_clock::now();
 
 		if (input.size() == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
