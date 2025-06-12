@@ -10,6 +10,7 @@
 
 #include "duckdb/common/winapi.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
+#include "duckdb/common/types/vector.hpp"
 #include "duckdb/main/capi/extension_api.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/extension.hpp"
@@ -48,6 +49,7 @@ public:
 	DUCKDB_API ~DatabaseInstance();
 
 	DBConfig config;
+	unique_ptr<Vector> udf_addresses;
 	SelectionVector udf_misses;
 	unique_ptr<GroupedAggregateHashTable> udf_cache;
 

@@ -179,8 +179,6 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
-		// auto start = std::chrono::high_resolution_clock::now();
-
 		py::gil_scoped_acquire gil;
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
@@ -302,9 +300,6 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 		if (input_size == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
 		}
-		// auto stop = std::chrono::high_resolution_clock::now();
-		// auto duration = std::chrono::duration_cast<std::chrono::microseconds>(stop - start);
-		// std::cout << "UDF call took: " << duration.count() << " micros" << std::endl;
 	};
 	return func;
 }
@@ -336,16 +331,20 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		py::gil_scoped_acquire gil;
 
 		// Initialize the cache if it isn't already
-		auto &cache = state.GetContext().db->udf_cache;
-		auto &misses = state.GetContext().db->udf_misses;
+		auto &db = state.GetContext().db;
+		auto &cache = db->udf_cache;
+		auto &misses = db->udf_misses;
+
 		if (cache == nullptr) {
 			cache = make_cache(input, state, result);
 			misses.Initialize();
+			db->udf_addresses = make_uniq<Vector>(LogicalType::POINTER);
 		}
 
+		auto *addresses = db->udf_addresses.get();
+
 		// Fetch the groups from the HT
-		Vector addresses(LogicalType::POINTER);
-		idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
+		idx_t miss_count = cache->FindOrCreateGroups(input, *addresses, misses);
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
@@ -406,9 +405,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 		// Fetch the aggregate result from the cache
 		RowOperationsState row_state(cache->GetAggregateAllocatorRef());
-		RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
-
-		auto after_agg = std::chrono::high_resolution_clock::now();
+		RowOperations::FinalizeStates(row_state, cache->GetLayout(), *addresses, payload, 0);
 
 		if (input.size() == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
