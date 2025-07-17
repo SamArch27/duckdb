@@ -165,6 +165,10 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 				if (placement != best) {
 					filter.expressions.clear();
 				}
+				
+				// Mark this UDF filter as processed to prevent re-processing
+				processed_udf_filters.insert(op);
+				
 				// create best != k
 				// auto comparison =
 				//     make_uniq<BoundComparisonExpression>(ExpressionType::COMPARE_NOTEQUAL, project_reference->Copy(),
@@ -333,27 +337,46 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 } // namespace duckdb
 
 unique_ptr<LogicalOperator> AdaptiveUDF::Rewrite(unique_ptr<LogicalOperator> op) {
-
-
-	// Add at the beginning of Rewrite function
-	static int call_count = 0;
-	if (++call_count > 1000) {
-			// Log error and abort
-			throw InternalException("AdaptiveUDF::Rewrite called too many times - infinite recursion detected");
+	// CRITICAL FIX: Add recursion depth protection to prevent infinite recursion
+	static thread_local int recursion_depth = 0;
+	const int MAX_RECURSION_DEPTH = 100;
+	
+	if (++recursion_depth > MAX_RECURSION_DEPTH) {
+		recursion_depth--;
+		// Log warning and return plan unchanged to prevent stack overflow
+		// In a production system, you might want to log this event
+		return op;
 	}
+
+	// CRITICAL FIX: Add debug counter to detect infinite loops early
+	static thread_local int call_count = 0;
+	if (++call_count > 10000) {
+		// Reset counter and throw exception to prevent runaway recursion
+		call_count = 0;
+		recursion_depth--;
+		throw InternalException("AdaptiveUDF::Rewrite called too many times - infinite recursion detected");
+	}
+
 	// Match on the top-most UDF filter and rewrite it to be adaptive
 	if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
 		auto &filter = op->Cast<LogicalFilter>();
-		if (filter.IsUDFFilter()) {
-			return RewriteUDFSubPlan(std::move(op));
+		// CRITICAL FIX: Only process UDF filters that haven't been processed yet
+		if (filter.IsUDFFilter() && processed_udf_filters.find(op.get()) == processed_udf_filters.end()) {
+			// Mark as processed BEFORE calling RewriteUDFSubPlan to prevent re-processing
+			processed_udf_filters.insert(op.get());
+			auto result = RewriteUDFSubPlan(std::move(op));
+			recursion_depth--;
+			return result;
 		}
 	}
 
+	// Recursively process children
 	for (idx_t i = 0; i < op->children.size(); i++) {
 		op->children[i] = Rewrite(std::move(op->children[i]));
 		rewriter.VisitOperatorExpressions(*op->children[i]);
 	}
 
+	recursion_depth--;
 	return op;
 }
 

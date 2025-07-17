@@ -35,5 +35,7 @@ private:
 	int64_t best;
 	vector<pair<ColumnBinding, ColumnBinding>> old_new_bindings;
 	BindingRewriter rewriter;
+
+	unordered_set<LogicalOperator*> processed_udf_filters;
 };
 } // namespace duckdb
