@@ -334,6 +334,13 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 
 unique_ptr<LogicalOperator> AdaptiveUDF::Rewrite(unique_ptr<LogicalOperator> op) {
 
+
+	// Add at the beginning of Rewrite function
+	static int call_count = 0;
+	if (++call_count > 1000) {
+			// Log error and abort
+			throw InternalException("AdaptiveUDF::Rewrite called too many times - infinite recursion detected");
+	}
 	// Match on the top-most UDF filter and rewrite it to be adaptive
 	if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
 		auto &filter = op->Cast<LogicalFilter>();
