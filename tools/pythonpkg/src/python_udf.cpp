@@ -225,19 +225,25 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 
 		// Create input tuple args to the vectorized UDF
 		auto input_args = py::tuple(input.ColumnCount());
+
 		for (int i = 0; i < input.ColumnCount(); ++i) {
+
 			// Create an array for this column
 			py::array_t<py::object> arr(input.size());
+
 			auto buf = arr.mutable_unchecked<1>();
 			auto &column = input.data[i];
 			// Populate the array with the column value for each row for the input
 			for (int row = 0; row < count; ++row) {
 				auto value = column.GetValue(row);
+
 				buf[row] = PythonObject::FromValue(value, column.GetType(), client_properties);
 			}
+
 			input_args[i] = arr;
 		}
 
+		// Call the function
 		auto ret = PyObject_CallObject(function, input_args.ptr());
 		bool exception_occurred = false;
 		if (ret == nullptr && PyErr_Occurred()) {

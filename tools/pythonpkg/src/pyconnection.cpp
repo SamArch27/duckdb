@@ -2171,6 +2171,7 @@ void DuckDBPyConnection::SetDefaultConnection(shared_ptr<DuckDBPyConnection> con
 PythonImportCache *DuckDBPyConnection::ImportCache() {
 	if (!import_cache) {
 		import_cache = make_shared_ptr<PythonImportCache>();
+		py::array_t<int> dummy_array(1);
 	}
 	return import_cache.get();
 }
