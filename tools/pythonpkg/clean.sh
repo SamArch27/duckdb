@@ -21,4 +21,4 @@ rm -f	$SCRIPTPATH/sources.list \
 		$SCRIPTPATH/includes.list \
 		$SCRIPTPATH/githash.list
 
-python3 -m pip uninstall duckdb --yes
+python3 -m pip uninstall duckdb --yes --break-system-packages

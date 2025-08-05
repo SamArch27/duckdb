@@ -1459,9 +1459,9 @@ if(BUILD_PYTHON)
     )
 
   if(PYTHON_EDITABLE_BUILD)
-    set(PIP_COMMAND ${PIP_COMMAND} ${Python3_EXECUTABLE} -m pip install --editable .)
+    set(PIP_COMMAND ${PIP_COMMAND} ${Python3_EXECUTABLE} -m pip install --editable . --break-system-packages --force-reinstall)
   else()
-    set(PIP_COMMAND ${PIP_COMMAND} ${Python3_EXECUTABLE} -m pip install .)
+    set(PIP_COMMAND ${PIP_COMMAND} ${Python3_EXECUTABLE} -m pip install . --break-system-packages --force-reinstall)
   endif()
 
   if(USER_SPACE)

@@ -27,6 +27,7 @@
 #include "duckdb_python/python_conversion.hpp"
 #include <chrono>
 #include <iostream>
+
 namespace duckdb {
 
 static py::list ConvertToSingleBatch(vector<LogicalType> &types, vector<string> &names, DataChunk &input,
@@ -185,13 +186,9 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 
 		// owning references
 		py::object python_object;
-		// Convert the input datachunk to pyarrow
-		//		ClientProperties options;
 
-		//		if (state.HasContext()) {
 		auto &context = state.GetContext();
 		auto options = context.GetClientProperties();
-		//		}
 
 		auto result_validity = FlatVector::Validity(result);
 		SelectionVector selvec(input.size());
@@ -230,43 +227,72 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 
 		// Call the function
 		auto ret = PyObject_CallObject(function, column_list.ptr());
-
 		bool exception_occurred = false;
 		if (ret == nullptr && PyErr_Occurred()) {
 			exception_occurred = true;
 			if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
 				auto exception = py::error_already_set();
 				throw InvalidInputException("Python exception occurred while executing the UDF: %s", exception.what());
-			} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
-				PyErr_Clear();
-				python_object = py::module_::import("pyarrow").attr("nulls")(count);
 			} else {
 				throw NotImplementedException("Exception handling type not implemented");
 			}
 		} else {
 			python_object = py::reinterpret_steal<py::object>(ret);
 		}
-		if (!py::isinstance(python_object, py::module_::import("pyarrow").attr("lib").attr("Table"))) {
-			// Try to convert into a table
-			py::list single_array(1);
-			py::list single_name(1);
 
-			single_array[0] = python_object;
-			single_name[0] = "c0";
-			try {
-				python_object = py::module_::import("pyarrow").attr("lib").attr("Table").attr("from_arrays")(
-				    single_array, py::arg("names") = single_name);
-			} catch (py::error_already_set &) {
-				throw InvalidInputException("Could not convert the result into an Arrow Table");
-			}
+		// cast result to a Python list
+		if (!py::isinstance<py::list>(ret)) {
+			throw InvalidInputException("Could not convert the result into a Python list");
 		}
-		// Convert the pyarrow result back to a DuckDB datachunk
-		if (count != input_size) {
+
+		auto py_list = static_cast<py::list>(python_object);
+		if (count == input_size) {
+			for (int row = 0; row < input_size; ++row) {
+				auto ret = py_list[row].ptr();
+				if (ret == nullptr && PyErr_Occurred()) {
+					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+						auto exception = py::error_already_set();
+						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+						                            exception.what());
+					} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
+						PyErr_Clear();
+						FlatVector::SetNull(result, row, true);
+						continue;
+					} else {
+						throw NotImplementedException("Exception handling type not implemented");
+					}
+				} else if ((!ret || ret == Py_None) && default_null_handling) {
+					throw InvalidInputException(NullHandlingError());
+				}
+				TransformPythonObject(ret, result, row);
+			}
+			if (default_null_handling && !exception_occurred) {
+				VerifyVectorizedNullHandling(result, count);
+			}
+		} else {
 			D_ASSERT(default_null_handling);
-			// We filtered out some NULLs, now we need to reconstruct the final result by adding the nulls back
 			Vector temp(result.GetType(), count);
-			// Convert the table into a temporary Vector
-			ConvertArrowTableToVector(python_object, temp, state.GetContext(), count);
+
+			for (int row = 0; row < count; ++row) {
+				auto ret = py_list[row].ptr();
+				if (ret == nullptr && PyErr_Occurred()) {
+					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+						auto exception = py::error_already_set();
+						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+						                            exception.what());
+					} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
+						PyErr_Clear();
+						FlatVector::SetNull(temp, row, true);
+						continue;
+					} else {
+						throw NotImplementedException("Exception handling type not implemented");
+					}
+				} else if ((!ret || ret == Py_None) && default_null_handling) {
+					throw InvalidInputException(NullHandlingError());
+				}
+				TransformPythonObject(ret, temp, row);
+			}
+
 			if (!exception_occurred) {
 				VerifyVectorizedNullHandling(temp, count);
 			}
@@ -290,11 +316,6 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 				FlatVector::SetNull(result, i, !result_validity.RowIsValid(i));
 			}
 			result.Verify(input_size);
-		} else {
-			ConvertArrowTableToVector(python_object, result, state.GetContext(), count);
-			if (default_null_handling && !exception_occurred) {
-				VerifyVectorizedNullHandling(result, count);
-			}
 		}
 
 		if (input_size == 1) {
@@ -486,7 +507,7 @@ public:
 			}
 		}
 		idx_t i = 0;
-		for (const auto &param : params) {
+		for (auto &param : params) {
 			auto type = py::cast<shared_ptr<DuckDBPyType>>(param);
 			parameters[i++] = type->Type();
 		}
@@ -539,7 +560,7 @@ public:
 
 		auto &import_cache = *DuckDBPyConnection::ImportCache();
 		// Import this module, because importing this from a non-main thread causes a segfault
-		(void)import_cache.numpy.core.multiarray();
+		// (void)import_cache.numpy.core.multiarray();
 
 		scalar_function_t func;
 		if (vectorized) {
