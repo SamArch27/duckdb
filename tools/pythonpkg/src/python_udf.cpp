@@ -176,6 +176,7 @@ static void VerifyVectorizedNullHandling(Vector &result, idx_t count) {
 }
 
 static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExceptionHandling exception_handling,
+                                                  const ClientProperties &client_properties,
                                                   FunctionNullHandling null_handling) {
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
@@ -220,13 +221,24 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			}
 		}
 
-		auto pyarrow_table = ConvertDataChunkToPyArrowTable(input, options, state.GetContext());
-		py::tuple column_list = pyarrow_table.attr("columns");
-
 		auto count = input.size();
 
-		// Call the function
-		auto ret = PyObject_CallObject(function, column_list.ptr());
+		// Create input tuple args to the vectorized UDF
+		auto input_args = py::tuple(input.ColumnCount());
+		for (int i = 0; i < input.ColumnCount(); ++i) {
+			// Create an array for this column
+			py::array_t<py::object> arr(input.size());
+			auto buf = arr.mutable_unchecked<1>();
+			auto &column = input.data[i];
+			// Populate the array with the column value for each row for the input
+			for (int row = 0; row < count; ++row) {
+				auto value = column.GetValue(row);
+				buf[row] = PythonObject::FromValue(value, column.GetType(), client_properties);
+			}
+			input_args[i] = arr;
+		}
+
+		auto ret = PyObject_CallObject(function, input_args.ptr());
 		bool exception_occurred = false;
 		if (ret == nullptr && PyErr_Occurred()) {
 			exception_occurred = true;
@@ -240,15 +252,15 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			python_object = py::reinterpret_steal<py::object>(ret);
 		}
 
-		// cast result to a Python list
-		if (!py::isinstance<py::list>(ret)) {
-			throw InvalidInputException("Could not convert the result into a Python list");
+		if (!py::isinstance<py::array_t<py::object>>(python_object)) {
+			throw InvalidInputException("Could not convert the result into a numpy array of Python objects");
 		}
 
-		auto py_list = static_cast<py::list>(python_object);
+		auto output_array = static_cast<py::array_t<py::object>>(python_object).unchecked<1>();
+
 		if (count == input_size) {
 			for (int row = 0; row < input_size; ++row) {
-				auto ret = py_list[row].ptr();
+				auto ret = output_array[row].ptr();
 				if (ret == nullptr && PyErr_Occurred()) {
 					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
 						auto exception = py::error_already_set();
@@ -274,7 +286,7 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			Vector temp(result.GetType(), count);
 
 			for (int row = 0; row < count; ++row) {
-				auto ret = py_list[row].ptr();
+				auto ret = output_array[row].ptr();
 				if (ret == nullptr && PyErr_Occurred()) {
 					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
 						auto exception = py::error_already_set();
@@ -560,11 +572,11 @@ public:
 
 		auto &import_cache = *DuckDBPyConnection::ImportCache();
 		// Import this module, because importing this from a non-main thread causes a segfault
-		// (void)import_cache.numpy.core.multiarray();
+		(void)import_cache.numpy.core.multiarray();
 
 		scalar_function_t func;
 		if (vectorized) {
-			func = CreateVectorizedFunction(udf.ptr(), exception_handling, null_handling);
+			func = CreateVectorizedFunction(udf.ptr(), exception_handling, client_properties, null_handling);
 		} else {
 			func = CreateNativeFunction(udf.ptr(), exception_handling, client_properties, null_handling);
 		}
