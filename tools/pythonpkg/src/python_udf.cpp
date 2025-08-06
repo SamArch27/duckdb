@@ -237,71 +237,109 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			}
 		}
 
+		// Initialize the cache if it isn't already
+		auto &cache = state.GetContext().db->udf_cache;
+		if (cache == nullptr) {
+			cache = MakeCache(input, state, result);
+		}
+
+		// Create state for HT
+		SelectionVector misses;
+		misses.Initialize();
+		Vector addresses(LogicalType::POINTER);
+
+		// Fetch the groups from the HT
+		idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
+
 		// Create input tuple args to the vectorized UDF
 		auto count = input.size();
-		auto input_args = py::tuple(input.ColumnCount());
-		for (int i = 0; i < input.ColumnCount(); ++i) {
-			// Create an array for this column
-			py::array_t<py::object> arr(input.size());
-			auto buf = arr.mutable_unchecked<1>();
-			auto &column = input.data[i];
-
-			// Populate the array with the column value for each row for the input
-			for (int row = 0; row < count; ++row) {
-				auto value = column.GetValue(row);
-				buf[row] = PythonObject::FromValue(value, column.GetType(), client_properties);
-			}
-			input_args[i] = arr;
-		}
-
-		// Set the timeout global variable
-		py::globals()["timeout"] = 500;
-
-		// Call the function
-		auto ret = PyObject_CallObject(function, input_args.ptr());
 		bool exception_occurred = false;
-		if (ret == nullptr && PyErr_Occurred()) {
-			exception_occurred = true;
-			if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-				auto exception = py::error_already_set();
-				throw InvalidInputException("Python exception occurred while executing the UDF: %s", exception.what());
-			} else {
-				throw NotImplementedException("Exception handling type not implemented");
-			}
-		} else {
-			python_object = py::reinterpret_steal<py::object>(ret);
-		}
 
-		// Cast the result to an array of Python objects
-		if (!py::isinstance<py::array_t<py::object>>(python_object)) {
-			throw InvalidInputException("Could not convert the result into a numpy array of Python objects");
+		if (miss_count != 0) {
+			auto input_args = py::tuple(input.ColumnCount());
+			for (int i = 0; i < input.ColumnCount(); ++i) {
+				// Create an array for this column
+				py::array_t<py::object> arr(miss_count);
+				auto buf = arr.mutable_unchecked<1>();
+				auto &column = input.data[i];
+
+				// Populate the array with the column value for each row for the input
+				for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
+					idx_t row = misses[miss_idx];
+					auto value = column.GetValue(row);
+					buf[miss_idx] = PythonObject::FromValue(value, column.GetType(), client_properties);
+				}
+				input_args[i] = arr;
+			}
+
+			// Set the timeout global variable
+			py::globals()["timeout"] = 5000;
+
+			// Call the function
+			auto ret = PyObject_CallObject(function, input_args.ptr());
+			if (ret == nullptr && PyErr_Occurred()) {
+				exception_occurred = true;
+				if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+					auto exception = py::error_already_set();
+					throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+					                            exception.what());
+				} else {
+					throw NotImplementedException("Exception handling type not implemented");
+				}
+			} else {
+				python_object = py::reinterpret_steal<py::object>(ret);
+			}
+
+			// Cast the result to an array of Python objects
+			if (!py::isinstance<py::array_t<py::object>>(python_object)) {
+				throw InvalidInputException("Could not convert the result into a numpy array of Python objects");
+			}
 		}
-		auto output_array = static_cast<py::array_t<py::object>>(python_object).unchecked<1>();
 
 		// Convert the array back to DuckDB's vector format
 		auto ConvertArrayToVector = [&](Vector &result) {
-			for (int row = 0; row < input_size; ++row) {
-				auto ret = output_array[row].ptr();
-				if (ret == nullptr && PyErr_Occurred()) {
-					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-						auto exception = py::error_already_set();
-						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-						                            exception.what());
-					} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
-						PyErr_Clear();
-						FlatVector::SetNull(result, row, true);
-						continue;
-					} else {
-						throw NotImplementedException("Exception handling type not implemented");
+			if (miss_count != 0) {
+				auto output_array = static_cast<py::array_t<py::object>>(python_object).unchecked<1>();
+				for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
+					idx_t row = misses[miss_idx];
+					auto ret = output_array[miss_idx].ptr();
+					if (ret == nullptr && PyErr_Occurred()) {
+						if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+							auto exception = py::error_already_set();
+							throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+							                            exception.what());
+						} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
+							PyErr_Clear();
+							FlatVector::SetNull(result, row, true);
+							continue;
+						} else {
+							throw NotImplementedException("Exception handling type not implemented");
+						}
+					} else if ((!ret || ret == Py_None) && default_null_handling) {
+						throw InvalidInputException(NullHandlingError());
 					}
-				} else if ((!ret || ret == Py_None) && default_null_handling) {
-					throw InvalidInputException(NullHandlingError());
+					TransformPythonObject(ret, result, row);
+					if (default_null_handling && !exception_occurred) {
+						VerifyVectorizedNullHandling(result, count);
+					}
 				}
-				TransformPythonObject(ret, result, row);
 			}
-			if (default_null_handling && !exception_occurred) {
-				VerifyVectorizedNullHandling(result, count);
+
+			// Reference the result vector using our DataChunk
+			DataChunk payload;
+			auto result_type = vector<LogicalType>(1, result.GetType());
+			payload.Initialize(Allocator::DefaultAllocator(), result_type);
+			payload.SetCardinality(input);
+			payload.data[0].Reference(result);
+
+			// Load the new values into the cache (if there are any)
+			if (miss_count != 0) {
+				cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
 			}
+
+			// Fetch the aggregate result from the cache
+			RowOperationsState row_state(cache->GetAggregateAllocatorRef());
+			RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
 		};
 
 		if (count == input_size) {
