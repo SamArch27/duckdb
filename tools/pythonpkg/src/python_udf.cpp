@@ -175,6 +175,22 @@ static void VerifyVectorizedNullHandling(Vector &result, idx_t count) {
 	throw InvalidInputException(NullHandlingError());
 }
 
+static unique_ptr<GroupedAggregateHashTable> MakeCache(DataChunk &input, ExpressionState &state, Vector &result) {
+	auto input_types = input.GetTypes();
+	auto output_types = vector<LogicalType>();
+	output_types.push_back(result.GetType());
+
+	auto first_agg = FirstFunctionGetter::GetFunction(result.GetType());
+	auto args = vector<unique_ptr<Expression>>();
+	args.push_back(make_uniq<BoundReferenceExpression>(result.GetType(), 0));
+	auto agg_expr =
+	    make_uniq<BoundAggregateExpression>(first_agg, std::move(args), nullptr, nullptr, AggregateType::NON_DISTINCT);
+	auto aggregates = vector<BoundAggregateExpression *>();
+	aggregates.push_back(agg_expr.get());
+	return make_uniq<GroupedAggregateHashTable>(state.GetContext(), BufferAllocator::Get(state.GetContext()),
+	                                            input_types, output_types, aggregates);
+}
+
 static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExceptionHandling exception_handling,
                                                   const ClientProperties &client_properties,
                                                   FunctionNullHandling null_handling) {
@@ -328,23 +344,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
-		auto make_cache = [](DataChunk &input, ExpressionState &state,
-		                     Vector &result) -> unique_ptr<GroupedAggregateHashTable> {
-			auto input_types = input.GetTypes();
-			auto output_types = vector<LogicalType>();
-			output_types.push_back(result.GetType());
-
-			auto first_agg = FirstFunctionGetter::GetFunction(result.GetType());
-			auto args = vector<unique_ptr<Expression>>();
-			args.push_back(make_uniq<BoundReferenceExpression>(result.GetType(), 0));
-			auto agg_expr = make_uniq<BoundAggregateExpression>(first_agg, std::move(args), nullptr, nullptr,
-			                                                    AggregateType::NON_DISTINCT);
-			auto aggregates = vector<BoundAggregateExpression *>();
-			aggregates.push_back(agg_expr.get());
-			return make_uniq<GroupedAggregateHashTable>(state.GetContext(), BufferAllocator::Get(state.GetContext()),
-			                                            input_types, output_types, aggregates);
-		};
-
 		py::gil_scoped_acquire gil;
 
 		// Initialize the cache if it isn't already
@@ -353,19 +352,18 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		auto &misses = db->udf_misses;
 
 		if (cache == nullptr) {
-			cache = make_cache(input, state, result);
+			cache = MakeCache(input, state, result);
 			misses.Initialize();
 			db->udf_addresses = make_uniq<Vector>(LogicalType::POINTER);
 		}
 
-		auto *addresses = db->udf_addresses.get();
-
 		// Fetch the groups from the HT
+		auto *addresses = db->udf_addresses.get();
 		idx_t miss_count = cache->FindOrCreateGroups(input, *addresses, misses);
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
-		// invoke the UDF for each miss
+		// Invoke the UDF for each miss
 		if (miss_count != 0) {
 			for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
 				idx_t row = misses[miss_idx];
