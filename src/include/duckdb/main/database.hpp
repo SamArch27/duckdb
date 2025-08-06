@@ -49,8 +49,6 @@ public:
 	DUCKDB_API ~DatabaseInstance();
 
 	DBConfig config;
-	unique_ptr<Vector> udf_addresses;
-	SelectionVector udf_misses;
 	unique_ptr<GroupedAggregateHashTable> udf_cache;
 
 public:

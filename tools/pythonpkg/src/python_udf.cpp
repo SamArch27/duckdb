@@ -254,6 +254,9 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			input_args[i] = arr;
 		}
 
+		// Set the timeout global variable
+		py::globals()["timeout"] = 500;
+
 		// Call the function
 		auto ret = PyObject_CallObject(function, input_args.ptr());
 		bool exception_occurred = false;
@@ -347,20 +350,18 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		py::gil_scoped_acquire gil;
 
 		// Initialize the cache if it isn't already
-		auto &db = state.GetContext().db;
-		auto &cache = db->udf_cache;
-		auto &misses = db->udf_misses;
-
+		auto &cache = state.GetContext().db->udf_cache;
 		if (cache == nullptr) {
 			cache = MakeCache(input, state, result);
-			misses.Initialize();
-			db->udf_addresses = make_uniq<Vector>(LogicalType::POINTER);
 		}
 
-		// Fetch the groups from the HT
-		auto *addresses = db->udf_addresses.get();
-		idx_t miss_count = cache->FindOrCreateGroups(input, *addresses, misses);
+		// Create state for HT
+		SelectionVector misses;
+		misses.Initialize();
+		Vector addresses(LogicalType::POINTER);
 
+		// Fetch the groups from the HT
+		idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
 		// Invoke the UDF for each miss
@@ -420,7 +421,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 		// Fetch the aggregate result from the cache
 		RowOperationsState row_state(cache->GetAggregateAllocatorRef());
-		RowOperations::FinalizeStates(row_state, cache->GetLayout(), *addresses, payload, 0);
+		RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
 
 		if (input.size() == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
