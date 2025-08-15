@@ -86,8 +86,8 @@ unique_ptr<NodeStatistics> StatisticsPropagator::PropagateStatistics(LogicalGet 
 		case FilterPropagateResult::FILTER_FALSE_OR_NULL:
 		case FilterPropagateResult::FILTER_ALWAYS_FALSE:
 			// filter is always false; this entire filter should be replaced by an empty result block
-			// ReplaceWithEmptyResult(node_ptr);
-			// return make_uniq<NodeStatistics>(0U, 0U);
+			ReplaceWithEmptyResult(node_ptr);
+			return make_uniq<NodeStatistics>(0U, 0U);
 		default:
 			// general case: filter can be true or false, update this columns' statistics
 			UpdateFilterStatistics(stats, *filter);

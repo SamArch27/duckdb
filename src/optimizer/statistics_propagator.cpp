@@ -26,7 +26,7 @@ StatisticsPropagator::StatisticsPropagator(Optimizer &optimizer_p, LogicalOperat
 }
 
 void StatisticsPropagator::ReplaceWithEmptyResult(unique_ptr<LogicalOperator> &node) {
-	node = make_uniq<LogicalEmptyResult>(std::move(node));
+	// node = make_uniq<LogicalEmptyResult>(std::move(node));
 }
 
 unique_ptr<NodeStatistics> StatisticsPropagator::PropagateChildren(LogicalOperator &node,
