@@ -39,9 +39,6 @@ public:
 		void ExtractBindings();
 	};
 
-	// TODO: Provide comments here.
-	bool HasUDFFilterInSubtree(LogicalOperator *op);
-
 private:
 	Optimizer &optimizer;
 	FilterCombiner combiner;

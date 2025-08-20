@@ -316,27 +316,6 @@ unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalO
 	return filter_op;
 }
 
-bool FilterPushdown::HasUDFFilterInSubtree(LogicalOperator *op) {
-	if (!op) {
-		return false;
-	}
-
-	if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
-		auto &filter = op->Cast<LogicalFilter>();
-		if (filter.IsUDFFilter()) {
-			return true;
-		}
-	}
-
-	for (auto &child : op->children) {
-		if (HasUDFFilterInSubtree(child.get())) {
-			return true;
-		}
-	}
-
-	return false;
-}
-
 unique_ptr<LogicalOperator> FilterPushdown::FinishPushdown(unique_ptr<LogicalOperator> op) {
 	// unhandled type, first perform filter pushdown in its children
 	for (auto &child : op->children) {

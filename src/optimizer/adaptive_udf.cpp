@@ -11,7 +11,8 @@
 
 namespace duckdb {
 
-AdaptiveUDF::AdaptiveUDF(Optimizer &optimizer, int64_t best) : optimizer(optimizer), best(best) {
+AdaptiveUDF::AdaptiveUDF(Optimizer &optimizer, int64_t fixed_placement)
+    : optimizer(optimizer), fixed_placement(fixed_placement) {
 }
 
 unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOperator> root_filter) {
@@ -39,9 +40,6 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 							if (Expression::Equals(filter.expressions[0], child_filter.expressions[0])) {
 								match = curr;
 								child_filter.expressions.clear();
-								if (best == 0) {
-									best = 1;
-								}
 								break;
 							}
 						}
@@ -69,41 +67,34 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 		stream.push_back(it->second);
 	}
 
-	// reverse the stream to get the right order
-	std::reverse(stream.begin(), stream.end());
-
-	for (auto *op : stream) {
+	auto placement = 0;
+	for (auto &op : stream) {
 		switch (op->type) {
-		case LogicalOperatorType::LOGICAL_FILTER:
+		case LogicalOperatorType::LOGICAL_FILTER: {
+			auto &filter = op->Cast<LogicalFilter>();
+			if (filter.IsUDFFilter()) {
+				++placement;
+
+				if (fixed_placement == 0) {
+					continue;
+				}
+				// if the position is hardcoded then clear any other filters
+				if (placement != fixed_placement) {
+					filter.expressions.clear();
+				}
+			}
+			break;
+		}
 		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
+			// TODO: Clear UDF filters in hash joins
 			break;
 		default:
 			throw NotImplementedException("Unsupported operator in stream!");
 		}
 	}
 
-	// consider filters lowest to highest
-	std::reverse(stream.begin(), stream.end());
-
-	// rewrite any UDF filter in the stream to be of the form (best != k OR udf(...))
-	auto placement = 0;
-	for (auto &op : stream) {
-		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
-			auto &filter = op->Cast<LogicalFilter>();
-			if (filter.IsUDFFilter()) {
-				// rewrite udf(...) to (best != k OR udf(...))
-				++placement;
-
-				// remove every filter not-matching the "best"
-				if (placement != best) {
-					filter.expressions.clear();
-				}
-			}
-		}
-	}
-
 	return root_filter;
-} // namespace duckdb
+}
 
 unique_ptr<LogicalOperator> AdaptiveUDF::Rewrite(unique_ptr<LogicalOperator> op) {
 
