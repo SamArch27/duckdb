@@ -156,7 +156,7 @@ struct DBConfigOptions {
 	//! The maximum size of the 'temp_directory' folder when set (in bytes). Default: 90% of available disk space.
 	idx_t maximum_swap_space = DConstants::INVALID_INDEX;
 	//! The place in the query plan to evaluate the UDF predicate
-	int64_t best_udf_placement = 42;
+	int64_t best_udf_placement = 0;
 	//! The maximum amount of CPU threads used by the database system. Default: all available.
 	idx_t maximum_threads = DConstants::INVALID_INDEX;
 	//! The number of external threads that work on DuckDB tasks. Default: 1.

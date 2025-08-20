@@ -20,11 +20,9 @@ public:
 
 public:
 	PhysicalProjection(vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
-	                   idx_t estimated_cardinality, unique_ptr<PhysicalOperator> filter = nullptr);
+	                   idx_t estimated_cardinality);
 
 	vector<unique_ptr<Expression>> select_list;
-	unique_ptr<PhysicalOperator> filter;
-	vector<ParametricCost> plan_costs;
 
 public:
 	unique_ptr<OperatorState> GetOperatorState(ExecutionContext &context) const override;

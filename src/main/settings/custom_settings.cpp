@@ -1378,7 +1378,7 @@ void BestUDFPlacementSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, 
 }
 
 void BestUDFPlacementSetting::ResetGlobal(DatabaseInstance *db, DBConfig &config) {
-	config.options.best_udf_placement = 42;
+	config.options.best_udf_placement = 0;
 }
 
 Value BestUDFPlacementSetting::GetSetting(const ClientContext &context) {

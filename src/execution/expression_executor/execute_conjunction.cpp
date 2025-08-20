@@ -2,9 +2,17 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/execution/adaptive_filter.hpp"
+
 #include <random>
 
 namespace duckdb {
+
+struct ConjunctionState : public ExpressionState {
+	ConjunctionState(const Expression &expr, ExpressionExecutorState &root) : ExpressionState(expr, root) {
+		adaptive_filter = make_uniq<AdaptiveFilter>(expr);
+	}
+	unique_ptr<AdaptiveFilter> adaptive_filter;
+};
 
 unique_ptr<ExpressionState> ExpressionExecutor::InitializeState(const BoundConjunctionExpression &expr,
                                                                 ExpressionExecutorState &root) {
@@ -66,15 +74,9 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 			true_sel = temp_true.get();
 		}
 		for (idx_t i = 0; i < expr.children.size(); i++) {
-			// Extract the valid index from the optional
-			auto idx = state.adaptive_filter->permutation[i];
-			if (!idx.IsValid()) {
-				continue;
-			}
-			idx_t index = idx.GetIndex();
-			// Select using the valid index
-			idx_t tcount = Select(*expr.children[index], state.child_states[index].get(), current_sel, current_count,
-			                      true_sel, temp_false.get());
+			idx_t tcount = Select(*expr.children[state.adaptive_filter->permutation[i]],
+			                      state.child_states[state.adaptive_filter->permutation[i]].get(), current_sel,
+			                      current_count, true_sel, temp_false.get());
 			idx_t fcount = current_count - tcount;
 			if (fcount > 0 && false_sel) {
 				// move failing tuples into the false_sel
@@ -83,8 +85,6 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 					false_sel->set_index(false_count++, temp_false->get_index(i));
 				}
 			}
-			filter_state.tuples_before_filter += tcount + fcount;
-			filter_state.tuples_after_filter += tcount;
 			current_count = tcount;
 			if (current_count == 0) {
 				break;
@@ -115,32 +115,19 @@ idx_t ExpressionExecutor::Select(const BoundConjunctionExpression &expr, Express
 			false_sel = temp_false.get();
 		}
 		for (idx_t i = 0; i < expr.children.size(); i++) {
-			// Extract the valid index from the optional
-			auto idx = state.adaptive_filter->permutation[i];
-			if (idx.IsValid()) { // Check if it's valid
-				idx_t index = idx.GetIndex();
-				// Select using the valid index
-				idx_t tcount = Select(*expr.children[index], state.child_states[index].get(), current_sel,
-				                      current_count, temp_true.get(), false_sel);
-				if (tcount > 0) {
-					if (true_sel) {
-						// tuples passed, move them into the actual result vector
-						for (idx_t i = 0; i < tcount; i++) {
-							true_sel->set_index(result_count++, temp_true->get_index(i));
-						}
+			idx_t tcount = Select(*expr.children[state.adaptive_filter->permutation[i]],
+			                      state.child_states[state.adaptive_filter->permutation[i]].get(), current_sel,
+			                      current_count, temp_true.get(), false_sel);
+			if (tcount > 0) {
+				if (true_sel) {
+					// tuples passed, move them into the actual result vector
+					for (idx_t i = 0; i < tcount; i++) {
+						true_sel->set_index(result_count++, temp_true->get_index(i));
 					}
-					if (tcount == current_count) {
-						break;
-					}
-
-					// now move on to check only the non-passing tuples
-					current_count -= tcount;
-					current_sel = false_sel;
 				}
-			} else {
-				// Handle invalid index (optional is not set)
-				// You can decide what action to take in this case (skip or error out)
-				throw InternalException("Invalid index in permutation array!");
+				// now move on to check only the non-passing tuples
+				current_count -= tcount;
+				current_sel = false_sel;
 			}
 		}
 

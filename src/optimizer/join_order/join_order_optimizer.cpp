@@ -3,7 +3,6 @@
 #include "duckdb/common/enums/join_type.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/pair.hpp"
-#include "duckdb/common/queue.hpp"
 #include "duckdb/optimizer/join_order/cost_model.hpp"
 #include "duckdb/optimizer/join_order/plan_enumerator.hpp"
 #include "duckdb/planner/expression/list.hpp"
@@ -72,62 +71,6 @@ unique_ptr<LogicalOperator> JoinOrderOptimizer::Optimize(unique_ptr<LogicalOpera
 
 	if (new_logical_plan->type == LogicalOperatorType::LOGICAL_EXPLAIN) {
 		new_logical_plan->SetEstimatedCardinality(3);
-	}
-
-	// BFS visit every operator
-	queue<LogicalOperator *> q;
-	q.push(new_logical_plan.get());
-	while (!q.empty()) {
-		auto *op = q.front();
-		q.pop();
-
-		// match on UDF filters
-		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
-			auto &filter = op->Cast<LogicalFilter>();
-			if (filter.IsUDFFilter()) {
-				set<string> referenced_columns;
-				for (auto &expr : filter.expressions) {
-					if (expr->ContainsUDF()) {
-						ExpressionIterator::EnumerateExpression(expr, [&](Expression &udf_expr) {
-							if (udf_expr.GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
-								auto &bound_func = udf_expr.Cast<BoundFunctionExpression>();
-								// match on the UDF expression itself
-								if (bound_func.function.IsUDF()) {
-									for (auto &child : bound_func.children) {
-										ExpressionIterator::EnumerateExpression(child, [&](Expression &arg_expr) {
-											if (arg_expr.type == ExpressionType::BOUND_COLUMN_REF) {
-												referenced_columns.insert(arg_expr.ToString());
-											}
-										});
-									}
-								}
-							}
-						});
-						if (!referenced_columns.empty()) {
-							idx_t product = 1;
-							for (auto &col : referenced_columns) {
-								// Find matching column in estimates
-								for (auto &stat : relation_stats) {
-									for (int i = 0; i < stat.column_names.size(); ++i) {
-										if (col == stat.column_names[i].substr(stat.column_names[i].find('.') + 1)) {
-											product *= stat.column_distinct_count[i].distinct_count;
-										}
-									}
-								}
-							}
-							if (product != 1) {
-								expr->SetDistinctValues(product);
-							}
-						}
-						break;
-					}
-				}
-			}
-		}
-
-		for (auto &child : op->children) {
-			q.push(child.get());
-		}
 	}
 
 	return new_logical_plan;

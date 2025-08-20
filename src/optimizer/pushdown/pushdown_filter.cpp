@@ -63,8 +63,7 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownFilter(unique_ptr<LogicalOpe
 		udf_filter->children.push_back(std::move(current_op));
 		current_op = std::move(udf_filter);
 	}
-	return std::move(current_op);
+	return current_op;
 }
 
 } // namespace duckdb
-

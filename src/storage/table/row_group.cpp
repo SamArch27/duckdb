@@ -601,10 +601,7 @@ void RowGroup::TemplatedScan(TransactionData transaction, CollectionScanState &s
 				auto &filter_list = filter_info.GetFilterList();
 				for (idx_t i = 0; i < filter_list.size(); i++) {
 					auto filter_idx = adaptive_filter->permutation[i];
-					if (!filter_idx.IsValid()) {
-						continue;
-					}
-					auto &filter = filter_list[filter_idx.GetIndex()];
+					auto &filter = filter_list[filter_idx];
 					if (filter.IsAlwaysTrue()) {
 						// this filter is always true - skip it
 						continue;

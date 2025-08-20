@@ -9,7 +9,6 @@
 #pragma once
 
 #include "duckdb/planner/logical_operator.hpp"
-#include "duckdb/optimizer/adaptive_udf.hpp"
 namespace duckdb {
 
 //! LogicalProjection represents the projection list in a SELECT clause
@@ -21,7 +20,6 @@ public:
 	LogicalProjection(idx_t table_index, vector<unique_ptr<Expression>> select_list);
 
 	idx_t table_index;
-	vector<ParametricCost> plan_costs;
 
 public:
 	vector<ColumnBinding> GetColumnBindings() override;

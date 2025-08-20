@@ -1102,10 +1102,7 @@ bool ParquetReader::ScanInternal(ClientContext &context, ParquetReaderScanState 
 				// if no rows are left we can stop checking filters
 				break;
 			}
-			if (!state.adaptive_filter->permutation[i].IsValid()) {
-				continue;
-			}
-			auto &scan_filter = state.scan_filters[state.adaptive_filter->permutation[i].GetIndex()];
+			auto &scan_filter = state.scan_filters[state.adaptive_filter->permutation[i]];
 			auto filter_entry = reader_data.filter_map[scan_filter.filter_idx];
 			if (filter_entry.is_constant) {
 				// this is a constant vector, look for the constant

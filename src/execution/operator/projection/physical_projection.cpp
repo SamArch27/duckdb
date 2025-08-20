@@ -11,18 +11,10 @@ namespace duckdb {
 
 class ProjectionState : public OperatorState {
 public:
-	explicit ProjectionState(ExecutionContext &context, const vector<unique_ptr<Expression>> &expressions,
-	                         const unique_ptr<PhysicalOperator> &filter)
+	explicit ProjectionState(ExecutionContext &context, const vector<unique_ptr<Expression>> &expressions)
 	    : executor(context.client, expressions) {
-		if (filter) {
-			intermediate_chunk = make_uniq<DataChunk>();
-			intermediate_chunk->Initialize(Allocator::DefaultAllocator(), filter->GetTypes());
-			filter_state = filter->GetOperatorState(context);
-		}
 	}
 
-	unique_ptr<DataChunk> intermediate_chunk;
-	unique_ptr<OperatorState> filter_state;
 	ExpressionExecutor executor;
 
 public:
@@ -32,47 +24,20 @@ public:
 };
 
 PhysicalProjection::PhysicalProjection(vector<LogicalType> types, vector<unique_ptr<Expression>> select_list,
-                                       idx_t estimated_cardinality, unique_ptr<PhysicalOperator> op)
+                                       idx_t estimated_cardinality)
     : PhysicalOperator(PhysicalOperatorType::PROJECTION, std::move(types), estimated_cardinality),
-      select_list(std::move(select_list)), filter(std::move(op)) {
+      select_list(std::move(select_list)) {
 }
 
 OperatorResultType PhysicalProjection::Execute(ExecutionContext &context, DataChunk &input, DataChunk &chunk,
                                                GlobalOperatorState &gstate, OperatorState &state_p) const {
 	auto &state = state_p.Cast<ProjectionState>();
-
-	if (filter) {
-		filter->Execute(context, input, *(state.intermediate_chunk), gstate, *state.filter_state);
-
-		auto &filter_state = state.filter_state->Cast<FilterState>();
-		auto &conjunction_state = filter_state.executor.GetStates()[0]->root_state->Cast<ConjunctionState>();
-		auto &adaptive_filter = conjunction_state.adaptive_filter;
-
-		vector<uint32_t> scalar_costs;
-		int count = 0;
-		for (auto &formula : plan_costs) {
-			auto cost = adaptive_filter->GetSampledCost();
-			auto selectivity = adaptive_filter->GetSampledSelectivity();
-			scalar_costs.push_back(static_cast<uint32_t>(formula.scalar_component + formula.cost_component * cost +
-			                                             formula.selectivity_component * selectivity));
-			++count;
-		}
-
-		auto it = std::min_element(scalar_costs.begin(), scalar_costs.end());
-		auto idx = std::distance(scalar_costs.begin(), it) + 1;
-
-		select_list.back()->Cast<BoundConstantExpression>().value = Value::INTEGER(idx);
-
-		state.executor.Execute(*(state.intermediate_chunk), chunk);
-		return OperatorResultType::NEED_MORE_INPUT;
-	}
-
 	state.executor.Execute(input, chunk);
 	return OperatorResultType::NEED_MORE_INPUT;
 }
 
 unique_ptr<OperatorState> PhysicalProjection::GetOperatorState(ExecutionContext &context) const {
-	return make_uniq<ProjectionState>(context, select_list, filter);
+	return make_uniq<ProjectionState>(context, select_list);
 }
 
 unique_ptr<PhysicalOperator>

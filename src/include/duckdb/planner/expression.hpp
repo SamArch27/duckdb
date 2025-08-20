@@ -33,10 +33,6 @@ public:
 	bool HasSubquery() const override;
 	bool IsScalar() const override;
 	bool HasParameter() const override;
-	bool IsLowest() const;
-	void SetLowest();
-	optional_idx GetDistinctValues() const;
-	void SetDistinctValues(optional_idx distinct_values);
 
 	virtual bool IsVolatile() const;
 	virtual bool IsConsistent() const;
@@ -72,13 +68,7 @@ protected:
 		alias = other.alias;
 		return_type = other.return_type;
 		query_location = other.query_location;
-		is_lowest = other.is_lowest;
-		distinct_values = other.distinct_values;
 	}
-
-private:
-	bool is_lowest = false;
-	optional_idx distinct_values;
 };
 
 } // namespace duckdb

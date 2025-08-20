@@ -313,17 +313,6 @@ unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalO
 	}
 
 	auto filter_op = AddLogicalFilter(std::move(op), std::move(expressions));
-	if (filter_op->type == LogicalOperatorType::LOGICAL_FILTER) {
-		auto &filter = filter_op->Cast<LogicalFilter>();
-		if (filter.IsUDFFilter()) {
-			bool udf_filter_below = HasUDFFilterInSubtree(filter_op->children[0].get());
-			if (!udf_filter_below) {
-				for (auto &expr : filter.expressions) {
-					expr->SetLowest();
-				}
-			}
-		}
-	}
 	return filter_op;
 }
 
