@@ -93,6 +93,18 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 			conds.erase(std::remove_if(conds.begin(), conds.end(),
 			                           [&](const JoinCondition &cond) { return cond.left->ContainsUDF(); }),
 			            conds.end());
+			// remove duplicates
+			vector<JoinCondition> new_conds;
+			for (auto &cond : conds) {
+				if (std::any_of(new_conds.begin(), new_conds.end(), [&](const JoinCondition &new_cond) {
+					    return new_cond.comparison == cond.comparison && Expression::Equals(new_cond.left, cond.left) &&
+					           Expression::Equals(new_cond.right, cond.right);
+				    })) {
+					continue;
+				}
+				new_conds.push_back(std::move(cond));
+			}
+			join.conditions = std::move(new_conds);
 			break;
 		}
 		default:
