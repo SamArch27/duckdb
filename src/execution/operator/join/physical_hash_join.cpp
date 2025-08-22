@@ -218,6 +218,9 @@ public:
 		auto &allocator = BufferAllocator::Get(context);
 
 		for (auto &cond : op.conditions) {
+			if (cond.right->ContainsUDF()) {
+				continue;
+			}
 			join_key_executor.AddExpression(*cond.right);
 		}
 		join_keys.Initialize(allocator, op.condition_types);
@@ -926,6 +929,9 @@ unique_ptr<OperatorState> PhysicalHashJoin::GetOperatorState(ExecutionContext &c
 		state->perfect_hash_join_state = sink.perfect_join_executor->GetOperatorState(context);
 	} else {
 		for (auto &cond : conditions) {
+			if (cond.right->ContainsUDF()) {
+				continue;
+			}
 			state->probe_executor.AddExpression(*cond.left);
 		}
 		TupleDataCollection::InitializeChunkState(state->join_key_state, condition_types);
@@ -1293,6 +1299,9 @@ HashJoinLocalSourceState::HashJoinLocalSourceState(const PhysicalHashJoin &op, c
 	TupleDataCollection::InitializeChunkState(join_key_state, op.condition_types);
 
 	for (auto &cond : op.conditions) {
+		if (cond.right->ContainsUDF()) {
+			continue;
+		}
 		lhs_join_key_executor.AddExpression(*cond.left);
 	}
 }

@@ -1,6 +1,7 @@
 #include "duckdb/optimizer/filter_pushdown.hpp"
 #include "duckdb/optimizer/filter_combiner.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/planner/joinside.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"

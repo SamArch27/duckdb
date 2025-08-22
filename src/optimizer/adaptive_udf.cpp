@@ -92,8 +92,15 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 			auto &conds = join.conditions;
 			// erase any UDF conditions in non-pipeline breaking joins (coming from the LHS)
 			conds.erase(std::remove_if(conds.begin(), conds.end(),
-			                           [&](const JoinCondition &cond) { return cond.left->ContainsUDF(); }),
+			                           [&](const JoinCondition &cond) {
+				                           return cond.left->ContainsUDF() ||
+				                                  (fixed_placement != 0 && cond.right->ContainsUDF());
+			                           }),
 			            conds.end());
+
+			if (fixed_placement) {
+			}
+
 			// remove duplicates
 			vector<JoinCondition> new_conds;
 			for (auto &cond : conds) {
