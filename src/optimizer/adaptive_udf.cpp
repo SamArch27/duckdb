@@ -76,7 +76,8 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 			if (filter.IsUDFFilter()) {
 				++placement;
 
-				if (fixed_placement == 0) {
+				// clear all UDF filters except for the very last one
+				if (fixed_placement == 0 && i + 1 == stream.size()) {
 					continue;
 				}
 				// if the position is hardcoded then clear any other filters
