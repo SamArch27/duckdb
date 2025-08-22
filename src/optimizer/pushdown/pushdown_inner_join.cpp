@@ -30,6 +30,12 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownInnerJoin(unique_ptr<Logical
 		auto &comp_join = join.Cast<LogicalComparisonJoin>();
 		// turn the conditions into filters
 		for (auto &i : comp_join.conditions) {
+			// no need to do pushdown of UDF filters from join conditions
+			if (udf_filter_pushdown) {
+				if (i.left->ContainsUDF() || i.right->ContainsUDF()) {
+					continue;
+				}
+			}
 			auto condition = JoinCondition::CreateExpression(std::move(i));
 			if (AddFilter(std::move(condition)) == FilterResult::UNSATISFIABLE) {
 				// filter statically evaluates to false, strip tree

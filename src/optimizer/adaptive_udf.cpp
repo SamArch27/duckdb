@@ -68,7 +68,8 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	}
 
 	auto placement = 0;
-	for (auto &op : stream) {
+	for (idx_t i = 0; i < stream.size(); ++i) {
+		auto &op = stream[i];
 		switch (op->type) {
 		case LogicalOperatorType::LOGICAL_FILTER: {
 			auto &filter = op->Cast<LogicalFilter>();
@@ -85,9 +86,15 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 			}
 			break;
 		}
-		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
-			// TODO: Clear UDF filters in hash joins
+		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {
+			auto &join = op->Cast<LogicalComparisonJoin>();
+			auto &conds = join.conditions;
+			// erase any UDF conditions in non-pipeline breaking joins (coming from the LHS)
+			conds.erase(std::remove_if(conds.begin(), conds.end(),
+			                           [&](const JoinCondition &cond) { return cond.left->ContainsUDF(); }),
+			            conds.end());
 			break;
+		}
 		default:
 			throw NotImplementedException("Unsupported operator in stream!");
 		}

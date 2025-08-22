@@ -1,6 +1,7 @@
 #include "duckdb/optimizer/filter_pushdown.hpp"
 #include "duckdb/optimizer/filter_combiner.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
+#include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
@@ -9,6 +10,7 @@
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_window.hpp"
+#include <iostream>
 namespace duckdb {
 
 using Filter = FilterPushdown::Filter;
@@ -190,6 +192,35 @@ unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> 
 	}
 
 	if (udf_filter_pushdown) {
+		// add the UDF to the join conditions
+		if (result->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+			auto &join = result->Cast<LogicalComparisonJoin>();
+
+			// check if we are pushing the UDF filter to the left or the right side
+			bool pushing_left = true;
+			if (join.children[1]->type == LogicalOperatorType::LOGICAL_FILTER) {
+				auto &filter = join.children[1]->Cast<LogicalFilter>();
+				if (filter.IsUDFFilter()) {
+					pushing_left = false;
+				}
+			}
+
+			for (auto &expr : udf_expressions) {
+				if (expr->expression_class == ExpressionClass::BOUND_COMPARISON) {
+					// Convert to either
+					// (1) TRUE = (udf_cond)
+					// (2) (udf_cond) = TRUE
+					// depending on whether we are pushing down the UDF filter through the LHS or RHS
+					auto &cond_expr = expr->Cast<BoundComparisonExpression>();
+					JoinCondition cond;
+					cond.comparison = ExpressionType::COMPARE_EQUAL;
+					cond.left = pushing_left ? cond_expr.Copy() : make_uniq<BoundConstantExpression>(Value(true));
+					cond.right = pushing_left ? make_uniq<BoundConstantExpression>(Value(true)) : cond_expr.Copy();
+					join.conditions.push_back(std::move(cond));
+				}
+			}
+		}
+
 		// attach UDF filters above
 		for (auto &expr : udf_expressions) {
 			auto dup_filter = make_uniq<LogicalFilter>();
