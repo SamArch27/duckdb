@@ -8,6 +8,7 @@
 #include "duckdb/function/aggregate/distributive_functions.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/optimizer/filter_combiner.hpp"
 #include "duckdb/parallel/base_pipeline_event.hpp"
@@ -15,7 +16,9 @@
 #include "duckdb/parallel/interrupt.hpp"
 #include "duckdb/parallel/pipeline.hpp"
 #include "duckdb/parallel/thread_context.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/expression/bound_aggregate_expression.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/filter/conjunction_filter.hpp"
 #include "duckdb/planner/filter/constant_filter.hpp"
@@ -26,7 +29,6 @@
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/temporary_memory_manager.hpp"
-
 namespace duckdb {
 
 PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, unique_ptr<PhysicalOperator> left,
@@ -858,6 +860,62 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 	}
 	sink.local_hash_tables.clear();
 	ht.Unpartition();
+
+	// TODO: Make the UDF cache here
+	// 1. Make the cache and store it in the query-level state
+	// 2. Make the cache use perfect hashing
+	// Initialize the cache if it isn't already
+
+	// Find the UDF filter
+
+	for (auto &cond : conditions) {
+		if (cond.right->ContainsUDF()) {
+			auto &cache = context.db->udf_cache;
+			if (cache == nullptr) {
+
+				// First check that there is exactly one UDF in this filter expression
+				idx_t udf_count = 0;
+				unique_ptr<Expression> expr_wrapper(const_cast<Expression *>(cond.right.get()));
+				ExpressionIterator::EnumerateExpression(expr_wrapper, [&](Expression &child) {
+					if (child.GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
+						auto &bound_func = child.Cast<BoundFunctionExpression>();
+						if (bound_func.function.IsUDF()) {
+							++udf_count;
+						}
+					}
+				});
+				D_ASSERT(udf_count == 1);
+
+				// Next, create the UDF cache using the UDF expression that we matched on
+				ExpressionIterator::EnumerateExpression(expr_wrapper, [&](Expression &child) {
+					if (child.GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
+
+						auto &bound_func = child.Cast<BoundFunctionExpression>();
+						auto &func = bound_func.function;
+
+						// Construct the UDF cache using the UDF expression
+						auto input_types = func.arguments;
+						auto output_types = vector<LogicalType>();
+						output_types.push_back(func.return_type);
+
+						auto first_agg = FirstFunctionGetter::GetFunction(func.return_type);
+						auto args = vector<unique_ptr<Expression>>();
+						args.push_back(make_uniq<BoundReferenceExpression>(func.return_type, 0));
+						auto agg_expr = make_uniq<BoundAggregateExpression>(first_agg, std::move(args), nullptr,
+						                                                    nullptr, AggregateType::NON_DISTINCT);
+						auto aggregates = vector<BoundAggregateExpression *>();
+						aggregates.push_back(agg_expr.get());
+						cache = make_uniq<GroupedAggregateHashTable>(context, BufferAllocator::Get(context),
+						                                             input_types, output_types, aggregates);
+					}
+				});
+
+				// Make sure to release ownership of the ExpressionWrapper
+				expr_wrapper.release();
+				break;
+			}
+		}
+	}
 
 	Value min;
 	Value max;

@@ -26,7 +26,6 @@
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb_python/python_conversion.hpp"
 #include <chrono>
-#include <iostream>
 
 namespace duckdb {
 
