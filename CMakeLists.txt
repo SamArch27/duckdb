@@ -28,7 +28,7 @@ set(DUCKDB_MODULE_BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-set(CMAKE_CXX_STANDARD "11" CACHE STRING "C++ standard to enforce")
+set(CMAKE_CXX_STANDARD "20" CACHE STRING "C++ standard to enforce")
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -1441,10 +1441,10 @@ if(BUILD_PYTHON)
   # Check for MSVC compiler and set the correct C++ standard flag
   if(MSVC)
     # MSVC does not support `-std=c++11` or `-std=c++14`, use `/std:c++14`
-    set(ALL_COMPILE_FLAGS "${ALL_COMPILE_FLAGS} /std:c++14")
+    set(ALL_COMPILE_FLAGS "${ALL_COMPILE_FLAGS} /std:c++20")
   else()
     # For non-MSVC compilers, use the `-std=c++11`
-    set(ALL_COMPILE_FLAGS "${ALL_COMPILE_FLAGS} -std=c++11")
+    set(ALL_COMPILE_FLAGS "${ALL_COMPILE_FLAGS} -std=c++20")
   endif()
 
   get_target_property(duckdb_libs duckdb LINK_LIBRARIES)

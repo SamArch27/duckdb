@@ -2,6 +2,7 @@
 
 #include "duckdb/common/radix_partitioning.hpp"
 #include "duckdb/common/types/value_map.hpp"
+#include "duckdb/common/acehash.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"
@@ -867,7 +868,6 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 	// Initialize the cache if it isn't already
 
 	// Find the UDF filter
-
 	for (auto &cond : conditions) {
 		if (cond.right->ContainsUDF()) {
 			auto &cache = context.db->udf_cache;
