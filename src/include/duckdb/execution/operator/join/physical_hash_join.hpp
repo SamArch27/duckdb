@@ -54,6 +54,9 @@ public:
 	//! Join Keys statistics (optional)
 	vector<unique_ptr<BaseStatistics>> join_stats;
 
+	//! Save the right projection map
+	vector<idx_t> new_right_projection_map;
+
 public:
 	InsertionOrderPreservingMap<string> ParamsToString() const override;
 

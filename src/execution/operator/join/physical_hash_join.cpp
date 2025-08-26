@@ -103,6 +103,8 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, unique_ptr<PhysicalOpera
 		}
 		rhs_output_columns.col_types.push_back(rhs_col_type);
 	}
+
+	new_right_projection_map = right_projection_map_copy;
 }
 
 PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, unique_ptr<PhysicalOperator> left,
@@ -866,11 +868,11 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 	// 1. Make the cache and store it in the query-level state
 	// 2. Make the cache use perfect hashing
 	// Initialize the cache if it isn't already
-
 	// Find the UDF filter
+
 	for (auto &cond : conditions) {
 		if (cond.right->ContainsUDF()) {
-			auto &cache = context.db->udf_cache;
+			auto &cache = context.db->perfect_udf_cache;
 			if (cache == nullptr) {
 
 				// First check that there is exactly one UDF in this filter expression
@@ -889,7 +891,6 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 				// Next, create the UDF cache using the UDF expression that we matched on
 				ExpressionIterator::EnumerateExpression(expr_wrapper, [&](Expression &child) {
 					if (child.GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
-
 						auto &bound_func = child.Cast<BoundFunctionExpression>();
 						auto &func = bound_func.function;
 
@@ -898,18 +899,46 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 						auto output_types = vector<LogicalType>();
 						output_types.push_back(func.return_type);
 
-						auto first_agg = FirstFunctionGetter::GetFunction(func.return_type);
-						auto args = vector<unique_ptr<Expression>>();
-						args.push_back(make_uniq<BoundReferenceExpression>(func.return_type, 0));
-						auto agg_expr = make_uniq<BoundAggregateExpression>(first_agg, std::move(args), nullptr,
-						                                                    nullptr, AggregateType::NON_DISTINCT);
-						auto aggregates = vector<BoundAggregateExpression *>();
-						aggregates.push_back(agg_expr.get());
-						cache = make_uniq<GroupedAggregateHashTable>(context, BufferAllocator::Get(context),
-						                                             input_types, output_types, aggregates);
-					}
-				});
+						// Only support single variable UDFs
+						if (input_types.size() != 1) {
+							return;
+						}
 
+						// Only support integer input type
+						if (input_types[0] != LogicalType::BIGINT) {
+							return;
+						}
+
+						// Only support integer return type
+						if (func.return_type != LogicalType::BIGINT) {
+							return;
+						}
+
+						// Rebind the column references in the UDF expression
+						auto &rhs_cols = rhs_output_columns.col_idxs;
+						unique_ptr<Expression> inner_expr_wrapper(const_cast<Expression *>(&child));
+						ExpressionIterator::EnumerateExpression(inner_expr_wrapper, [&](Expression &inner_child) {
+							if (inner_child.GetExpressionType() == ExpressionType::BOUND_REF) {
+								auto &ref = inner_child.Cast<BoundReferenceExpression>();
+								auto it = std::find(new_right_projection_map.begin(), new_right_projection_map.end(),
+								                    ref.index);
+								D_ASSERT(it != new_right_projection_map.end());
+								auto offset = std::distance(new_right_projection_map.begin(), it);
+								ref.index = rhs_cols[offset];
+							}
+						});
+
+						inner_expr_wrapper.release();
+					}
+
+					idx_t row_count = 10;
+					vector<int32_t> keys(row_count);
+					vector<int32_t> values(row_count);
+
+					// cache = make_unique<acehash::AceHashMapV4<int32_t, int32_t>>(row_count,
+					// keys.data(),
+					//                                                              values.data(), 2.5, 1.0);
+				});
 				// Make sure to release ownership of the ExpressionWrapper
 				expr_wrapper.release();
 				break;

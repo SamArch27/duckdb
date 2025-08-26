@@ -4,7 +4,9 @@
 #include <cstdint>
 #include <memory>
 #include <random>
+#include <algorithm>
 #include <type_traits>
+#include <utility>
 
 namespace acehash {
 
