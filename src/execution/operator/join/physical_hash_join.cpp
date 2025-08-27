@@ -925,19 +925,34 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 								D_ASSERT(it != new_right_projection_map.end());
 								auto offset = std::distance(new_right_projection_map.begin(), it);
 								ref.index = rhs_cols[offset];
+								auto &data_collection = ht.GetDataCollection();
+								Vector tuples_addresses(LogicalType::POINTER,
+								                        ht.Count()); // allocate space for all the tuples
+								idx_t key_count = 0;
+								if (data_collection.ChunkCount() > 0) {
+									JoinHTScanState join_ht_state(data_collection, 0, data_collection.ChunkCount(),
+									                              TupleDataPinProperties::KEEP_EVERYTHING_PINNED);
+									key_count = ht.FillWithHTOffsets(join_ht_state, tuples_addresses);
+								}
+
+								// Scan the build keys in the hash table
+								idx_t build_idx = ref.index;
+								Vector build_vector(ht.layout.GetTypes()[build_idx], key_count);
+
+								data_collection.Gather(tuples_addresses, *FlatVector::IncrementalSelectionVector(),
+								                       key_count, build_idx, build_vector,
+								                       *FlatVector::IncrementalSelectionVector(), nullptr);
+
+								idx_t row_count = key_count;
+								auto *keys = (int64_t *)build_vector.GetData();
+
+								vector<int64_t> values(row_count);
+								cache = make_uniq<acehash::AceHashMapV4<int64_t, int64_t>>(row_count, keys,
+								                                                           values.data(), 2.5, 1.0);
 							}
 						});
-
 						inner_expr_wrapper.release();
 					}
-
-					idx_t row_count = 10;
-					vector<int32_t> keys(row_count);
-					vector<int32_t> values(row_count);
-
-					// cache = make_unique<acehash::AceHashMapV4<int32_t, int32_t>>(row_count,
-					// keys.data(),
-					//                                                              values.data(), 2.5, 1.0);
 				});
 				// Make sure to release ownership of the ExpressionWrapper
 				expr_wrapper.release();

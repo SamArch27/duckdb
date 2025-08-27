@@ -51,7 +51,7 @@ public:
 
 	DBConfig config;
 	unique_ptr<GroupedAggregateHashTable> udf_cache;
-	unique_ptr<acehash::AceHashMapV4<int32_t, int32_t>> perfect_udf_cache;
+	unique_ptr<acehash::AceHashMapV4<int64_t, int64_t>> perfect_udf_cache;
 
 public:
 	BufferPool &GetBufferPool() const;

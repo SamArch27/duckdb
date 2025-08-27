@@ -504,7 +504,8 @@ public:
 	}
 
 	template <typename KeyIterator, typename Scheduler = SerialScheduler, typename Generator = std::mt19937>
-	Node(KeyIterator begin, KeyIterator end, Config<Scheduler, Generator> config = {}, double *fraction_f1 = nullptr) {
+	std::vector<Key> populate_unlinked_node(KeyIterator begin, KeyIterator end, Config<Scheduler, Generator> &config,
+	                                        double *fraction_f1) {
 		hasher_1_ = Hasher(config.generator);
 		hasher_2_ = Hasher(config.generator);
 		hasher_3_ = Hasher(config.generator);
@@ -593,11 +594,35 @@ public:
 
 		if (!next_keys.empty()) {
 			offsets_ = occupied.get_unoccupied_slot_indices(next_keys.size());
-
 			config.lambda = 2.0;
 			config.alpha = 1.0;
-			next_ = std::make_unique<Node<Key, Hasher, multi_round_partition, false>>(
-			    next_keys.begin(), next_keys.end(), std::move(config));
+		}
+		return next_keys;
+	}
+
+	template <typename KeyIterator, typename Scheduler = SerialScheduler, typename Generator = std::mt19937>
+	Node(KeyIterator begin, KeyIterator end, Config<Scheduler, Generator> config = {}, double *fraction_f1 = nullptr) {
+
+		using LinkedNode = Node<Key, Hasher, multi_round_partition, false>;
+
+		// populate this node
+		std::vector<Key> next_keys = populate_unlinked_node(begin, end, config, fraction_f1);
+		// handle residual keys for this node
+		if (!next_keys.empty()) {
+			// allocate a new empty node
+			next_ = std::make_unique<LinkedNode>();
+			// populate it
+			auto res = next_->populate_unlinked_node(next_keys.begin(), next_keys.end(), config, fraction_f1);
+			next_keys = res;
+			// iteratively handle residual keys for the remaining nodes
+			LinkedNode *current_node = next_.get();
+			while (!next_keys.empty()) {
+				current_node->next_ = std::make_unique<LinkedNode>();
+				auto res2 = current_node->next_->populate_unlinked_node(next_keys.begin(), next_keys.end(), config,
+				                                                        fraction_f1);
+				next_keys = res2;
+				current_node = current_node->next_.get();
+			}
 		}
 	}
 
@@ -696,6 +721,8 @@ private:
 	uint32_t num_lines_;
 	std::vector<uint8_t> seeds_;
 	std::vector<uint32_t> offsets_;
+
+public:
 	std::unique_ptr<Node<Key, Hasher, multi_round_partition, false>> next_;
 };
 
