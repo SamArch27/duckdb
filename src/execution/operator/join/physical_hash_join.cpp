@@ -871,6 +871,9 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 	// Find the UDF filter
 
 	for (auto &cond : conditions) {
+		if (!DBConfig::GetConfig(context).options.perfect_hashing) {
+			break;
+		}
 		if (cond.right->ContainsUDF()) {
 			auto &cache = context.db->perfect_udf_cache;
 			if (cache == nullptr) {

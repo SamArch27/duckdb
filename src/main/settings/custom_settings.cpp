@@ -1370,6 +1370,23 @@ Value ThreadsSetting::GetSetting(const ClientContext &context) {
 }
 
 //===----------------------------------------------------------------------===//
+// Perfect hashing
+//===----------------------------------------------------------------------===//
+void PerfectHashingSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {
+	auto new_val = input.GetValue<bool>();
+	config.options.perfect_hashing = new_val;
+}
+
+void PerfectHashingSetting::ResetGlobal(DatabaseInstance *db, DBConfig &config) {
+	config.options.perfect_hashing = true;
+}
+
+Value PerfectHashingSetting::GetSetting(const ClientContext &context) {
+	auto &config = DBConfig::GetConfig(context);
+	return Value::BOOLEAN(NumericCast<bool>(config.options.perfect_hashing));
+}
+
+//===----------------------------------------------------------------------===//
 // Best UDF Placement
 //===----------------------------------------------------------------------===//
 void BestUDFPlacementSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {

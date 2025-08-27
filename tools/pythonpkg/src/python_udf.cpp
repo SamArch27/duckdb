@@ -4,6 +4,7 @@
 #include "duckdb_python/pytype.hpp"
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pandas/pandas_scan.hpp"
+#include "duckdb/common/acehash.hpp"
 #include "duckdb/common/allocator.hpp"
 #include "duckdb/common/row_operations/row_operations.hpp"
 #include "duckdb/common/arrow/arrow.hpp"
@@ -26,7 +27,7 @@
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb_python/python_conversion.hpp"
 #include <chrono>
-
+#include <iostream>
 namespace duckdb {
 
 static py::list ConvertToSingleBatch(vector<LogicalType> &types, vector<string> &names, DataChunk &input,
@@ -256,7 +257,7 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 
 		if (miss_count != 0) {
 			auto input_args = py::tuple(input.ColumnCount());
-			for (int i = 0; i < input.ColumnCount(); ++i) {
+			for (idx_t i = 0; i < input.ColumnCount(); ++i) {
 				// Create an array for this column
 				py::array_t<py::object> arr(miss_count);
 				auto buf = arr.mutable_unchecked<1>();
@@ -385,6 +386,63 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	// We just need to make sure that it doesn't get garbage collected
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
 		py::gil_scoped_acquire gil;
+		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
+
+		// do perfect hashing if we can
+		auto &perfect_cache = state.GetContext().db->perfect_udf_cache;
+		if (perfect_cache != nullptr) {
+			auto *keys = (int64_t *)input.data[0].GetData();
+			auto *values = (int64_t *)result.GetData();
+			for (idx_t row = 0; row < input.size(); ++row) {
+				auto &val = perfect_cache->retrieve(keys[row]);
+				// Not computed yet
+				if (val == 0) {
+					// Execute the UDF
+					auto bundled_parameters = py::tuple((int)input.ColumnCount());
+					bool contains_null = false;
+					for (idx_t i = 0; i < input.ColumnCount(); i++) {
+						// Fill the tuple with the arguments for this row
+						auto &column = input.data[i];
+						auto value = column.GetValue(row);
+						if (value.IsNull() && default_null_handling) {
+							contains_null = true;
+							break;
+						}
+						bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
+					}
+					if (contains_null) {
+						// Immediately insert None, no need to call the function
+						FlatVector::SetNull(result, row, true);
+						continue;
+					}
+
+					// Call the function
+					auto ret = PyObject_CallObject(function, bundled_parameters.ptr());
+					if (ret == nullptr && PyErr_Occurred()) {
+						if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+							auto exception = py::error_already_set();
+							throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+							                            exception.what());
+						} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
+							PyErr_Clear();
+							FlatVector::SetNull(result, row, true);
+							continue;
+						} else {
+							throw NotImplementedException("Exception handling type not implemented");
+						}
+					} else if ((!ret || ret == Py_None) && default_null_handling) {
+						throw InvalidInputException(NullHandlingError());
+					}
+					TransformPythonObject(ret, result, row);
+					// Save the result in the PHF
+					val = values[row];
+				} else {
+					// Store the cached value directly in the result
+					values[row] = val;
+				}
+			}
+			return;
+		}
 
 		// Initialize the cache if it isn't already
 		auto &cache = state.GetContext().db->udf_cache;
@@ -399,7 +457,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 		// Fetch the groups from the HT
 		idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
-		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
 		// Invoke the UDF for each miss
 		if (miss_count != 0) {

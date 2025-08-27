@@ -867,7 +867,7 @@ public:
 		return function_.parameters();
 	}
 
-private:
+public:
 	Function function_;
 	std::vector<Value> values_;
 };
