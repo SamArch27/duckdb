@@ -864,12 +864,6 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 	sink.local_hash_tables.clear();
 	ht.Unpartition();
 
-	// TODO: Make the UDF cache here
-	// 1. Make the cache and store it in the query-level state
-	// 2. Make the cache use perfect hashing
-	// Initialize the cache if it isn't already
-	// Find the UDF filter
-
 	for (auto &cond : conditions) {
 		if (!DBConfig::GetConfig(context).options.perfect_hashing) {
 			break;
@@ -941,17 +935,21 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 								// Scan the build keys in the hash table
 								idx_t build_idx = ref.index;
 								Vector build_vector(ht.layout.GetTypes()[build_idx], key_count);
-
 								data_collection.Gather(tuples_addresses, *FlatVector::IncrementalSelectionVector(),
 								                       key_count, build_idx, build_vector,
 								                       *FlatVector::IncrementalSelectionVector(), nullptr);
-
-								idx_t row_count = key_count;
-								auto *keys = (int64_t *)build_vector.GetData();
-
-								vector<int64_t> values(row_count);
-								cache = make_uniq<acehash::AceHashMapV4<int64_t, int64_t>>(row_count, keys,
-								                                                           values.data(), 2.5, 1.0);
+								// Dedup the keys
+								unordered_set<int64_t> dedup;
+								for (idx_t k = 0; k < key_count; k++) {
+									dedup.insert(IntegerValue::Get(build_vector.GetValue(k)));
+								}
+								// Build the vector of unique keys
+								vector<int64_t> unique_keys(dedup.begin(), dedup.end());
+								// Create an output vector of the same length
+								vector<int64_t> values(unique_keys.size());
+								// Construct the PHF
+								cache = make_uniq<acehash::AceHashMapV4<int64_t, int64_t>>(
+								    unique_keys.size(), unique_keys.data(), values.data(), 2.5, 1.0);
 							}
 						});
 						inner_expr_wrapper.release();
