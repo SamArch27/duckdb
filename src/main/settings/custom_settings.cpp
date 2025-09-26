@@ -1370,20 +1370,20 @@ Value ThreadsSetting::GetSetting(const ClientContext &context) {
 }
 
 //===----------------------------------------------------------------------===//
-// Perfect hashing
+// UDF Caching
 //===----------------------------------------------------------------------===//
-void PerfectHashingSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {
+void UDFCachingSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {
 	auto new_val = input.GetValue<bool>();
-	config.options.perfect_hashing = new_val;
+	config.options.udf_caching = new_val;
 }
 
-void PerfectHashingSetting::ResetGlobal(DatabaseInstance *db, DBConfig &config) {
-	config.options.perfect_hashing = true;
+void UDFCachingSetting::ResetGlobal(DatabaseInstance *db, DBConfig &config) {
+	config.options.udf_caching = true;
 }
 
-Value PerfectHashingSetting::GetSetting(const ClientContext &context) {
+Value UDFCachingSetting::GetSetting(const ClientContext &context) {
 	auto &config = DBConfig::GetConfig(context);
-	return Value::BOOLEAN(NumericCast<bool>(config.options.perfect_hashing));
+	return Value::BOOLEAN(NumericCast<bool>(config.options.udf_caching));
 }
 
 //===----------------------------------------------------------------------===//

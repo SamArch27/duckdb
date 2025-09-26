@@ -157,8 +157,8 @@ struct DBConfigOptions {
 	idx_t maximum_swap_space = DConstants::INVALID_INDEX;
 	//! The place in the query plan to evaluate the UDF predicate
 	int64_t best_udf_placement = 0;
-	//! Whether to use perfect hashing
-	bool perfect_hashing = true;
+	//! Whether to cache UDF calls
+	bool udf_caching = true;
 	//! The maximum amount of CPU threads used by the database system. Default: all available.
 	idx_t maximum_threads = DConstants::INVALID_INDEX;
 	//! The number of external threads that work on DuckDB tasks. Default: 1.

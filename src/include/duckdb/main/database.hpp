@@ -8,7 +8,6 @@
 
 #pragma once
 
-#include "duckdb/common/acehash.hpp"
 #include "duckdb/common/winapi.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
 #include "duckdb/common/types/vector.hpp"
@@ -51,7 +50,6 @@ public:
 
 	DBConfig config;
 	unique_ptr<GroupedAggregateHashTable> udf_cache;
-	unique_ptr<acehash::AceHashMapV4<int64_t, int64_t>> perfect_udf_cache;
 
 public:
 	BufferPool &GetBufferPool() const;

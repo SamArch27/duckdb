@@ -1,8 +1,7 @@
 #include "duckdb/execution/operator/join/physical_hash_join.hpp"
-
+#include "duckdb/common/assert.hpp"
 #include "duckdb/common/radix_partitioning.hpp"
 #include "duckdb/common/types/value_map.hpp"
-#include "duckdb/common/acehash.hpp"
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"
@@ -863,104 +862,6 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 	}
 	sink.local_hash_tables.clear();
 	ht.Unpartition();
-
-	for (auto &cond : conditions) {
-		if (!DBConfig::GetConfig(context).options.perfect_hashing) {
-			break;
-		}
-		if (cond.right->ContainsUDF()) {
-			auto &cache = context.db->perfect_udf_cache;
-			if (cache == nullptr) {
-
-				// First check that there is exactly one UDF in this filter expression
-				idx_t udf_count = 0;
-				unique_ptr<Expression> expr_wrapper(const_cast<Expression *>(cond.right.get()));
-				ExpressionIterator::EnumerateExpression(expr_wrapper, [&](Expression &child) {
-					if (child.GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
-						auto &bound_func = child.Cast<BoundFunctionExpression>();
-						if (bound_func.function.IsUDF()) {
-							++udf_count;
-						}
-					}
-				});
-				D_ASSERT(udf_count == 1);
-
-				// Next, create the UDF cache using the UDF expression that we matched on
-				ExpressionIterator::EnumerateExpression(expr_wrapper, [&](Expression &child) {
-					if (child.GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
-						auto &bound_func = child.Cast<BoundFunctionExpression>();
-						auto &func = bound_func.function;
-
-						// Construct the UDF cache using the UDF expression
-						auto input_types = func.arguments;
-						auto output_types = vector<LogicalType>();
-						output_types.push_back(func.return_type);
-
-						// Only support single variable UDFs
-						if (input_types.size() != 1) {
-							return;
-						}
-
-						// Only support integer input type
-						if (input_types[0] != LogicalType::BIGINT) {
-							return;
-						}
-
-						// Only support integer return type
-						if (func.return_type != LogicalType::BIGINT) {
-							return;
-						}
-
-						// Rebind the column references in the UDF expression
-						auto &rhs_cols = rhs_output_columns.col_idxs;
-						unique_ptr<Expression> inner_expr_wrapper(const_cast<Expression *>(&child));
-						ExpressionIterator::EnumerateExpression(inner_expr_wrapper, [&](Expression &inner_child) {
-							if (inner_child.GetExpressionType() == ExpressionType::BOUND_REF) {
-								auto &ref = inner_child.Cast<BoundReferenceExpression>();
-								auto it = std::find(new_right_projection_map.begin(), new_right_projection_map.end(),
-								                    ref.index);
-								D_ASSERT(it != new_right_projection_map.end());
-								auto offset = std::distance(new_right_projection_map.begin(), it);
-								ref.index = rhs_cols[offset];
-								auto &data_collection = ht.GetDataCollection();
-								Vector tuples_addresses(LogicalType::POINTER,
-								                        ht.Count()); // allocate space for all the tuples
-								idx_t key_count = 0;
-								if (data_collection.ChunkCount() > 0) {
-									JoinHTScanState join_ht_state(data_collection, 0, data_collection.ChunkCount(),
-									                              TupleDataPinProperties::KEEP_EVERYTHING_PINNED);
-									key_count = ht.FillWithHTOffsets(join_ht_state, tuples_addresses);
-								}
-
-								// Scan the build keys in the hash table
-								idx_t build_idx = ref.index;
-								Vector build_vector(ht.layout.GetTypes()[build_idx], key_count);
-								data_collection.Gather(tuples_addresses, *FlatVector::IncrementalSelectionVector(),
-								                       key_count, build_idx, build_vector,
-								                       *FlatVector::IncrementalSelectionVector(), nullptr);
-								// Dedup the keys
-								unordered_set<int64_t> dedup;
-								for (idx_t k = 0; k < key_count; k++) {
-									dedup.insert(IntegerValue::Get(build_vector.GetValue(k)));
-								}
-								// Build the vector of unique keys
-								vector<int64_t> unique_keys(dedup.begin(), dedup.end());
-								// Create an output vector of the same length
-								vector<int64_t> values(unique_keys.size());
-								// Construct the PHF
-								cache = make_uniq<acehash::AceHashMapV4<int64_t, int64_t>>(
-								    unique_keys.size(), unique_keys.data(), values.data(), 2.5, 1.0);
-							}
-						});
-						inner_expr_wrapper.release();
-					}
-				});
-				// Make sure to release ownership of the ExpressionWrapper
-				expr_wrapper.release();
-				break;
-			}
-		}
-	}
 
 	Value min;
 	Value max;
