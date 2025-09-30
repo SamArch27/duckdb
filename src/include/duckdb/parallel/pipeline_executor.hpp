@@ -131,6 +131,17 @@ private:
 	//! Whether the current flushing_idx should be flushed: this needs to be stored to make flushing code re-entrant
 	bool should_flush_current_idx = true;
 
+	// lip
+	vector<unique_ptr<DataChunk>> lip_chunks;
+	vector<idx_t> lip_join_idxs;
+	using LIPCount = idx_t;
+	using LIPMiss = idx_t;
+	unordered_map<idx_t, pair<LIPCount, LIPMiss>> lip_statistics;
+	idx_t lip_counter = 0;
+
+	static constexpr const idx_t LIP_THRESHOLD = 64;
+	static constexpr const idx_t CACHE_THRESHOLD = 64;
+
 private:
 	void StartOperator(PhysicalOperator &op);
 	void EndOperator(PhysicalOperator &op, optional_ptr<DataChunk> chunk);

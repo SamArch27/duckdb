@@ -77,6 +77,7 @@ public:
 	explicit Pipeline(Executor &execution_context);
 
 	Executor &executor;
+	bool is_lip_pipeline = false;
 
 public:
 	ClientContext &GetClientContext();

@@ -4,6 +4,7 @@
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/tree_renderer/text_tree_renderer.hpp"
 #include "duckdb/execution/executor.hpp"
+#include "duckdb/execution/operator/join/physical_hash_join.hpp"
 #include "duckdb/execution/operator/aggregate/physical_ungrouped_aggregate.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
 #include "duckdb/execution/operator/set/physical_recursive_cte.hpp"
@@ -243,6 +244,16 @@ void Pipeline::Ready() {
 	}
 	ready = true;
 	std::reverse(operators.begin(), operators.end());
+
+	// check if the pipeline is "LIP"-able
+	for (auto op : operators) {
+		if (op.get().type == PhysicalOperatorType::HASH_JOIN) {
+			auto &hj = (PhysicalHashJoin &)op.get();
+			if (hj.build_bloom_filter) {
+				is_lip_pipeline = true;
+			}
+		}
+	}
 }
 
 void Pipeline::AddDependency(shared_ptr<Pipeline> &pipeline) {

@@ -3,6 +3,7 @@
 #include "duckdb/common/radix_partitioning.hpp"
 #include "duckdb/common/types/value_map.hpp"
 #include "duckdb/execution/expression_executor.hpp"
+#include "duckdb/execution/operator/join/bloom_filter.hpp"
 #include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"
 #include "duckdb/function/aggregate/distributive_functions.hpp"
@@ -102,8 +103,6 @@ PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, unique_ptr<PhysicalOpera
 		}
 		rhs_output_columns.col_types.push_back(rhs_col_type);
 	}
-
-	new_right_projection_map = right_projection_map_copy;
 }
 
 PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, unique_ptr<PhysicalOperator> left,
@@ -145,6 +144,17 @@ public:
 	      probe_side_requirement(0), scanned_data(false) {
 		hash_table = op.InitializeHashTable(context);
 
+		// For LIP
+		if (op.build_bloom_filter) {
+			bloom_parameters params;
+			params.projected_element_count = std::max(op.estimated_cardinality, idx_t(64));
+			params.maximum_size = std::max(8 * op.estimated_cardinality, idx_t(64));
+			params.maximum_number_of_hashes = 1;
+			D_ASSERT(!!params);
+			params.compute_optimal_parameters();
+			bfilter = make_uniq<bloom_filter>(params);
+		}
+
 		// For perfect hash join
 		perfect_join_executor = make_uniq<PerfectHashJoinExecutor>(op, *hash_table);
 		bool use_perfect_hash = false;
@@ -181,6 +191,8 @@ public:
 
 	//! Global HT used by the join
 	unique_ptr<JoinHashTable> hash_table;
+	//! LIP Bloom Filter
+	unique_ptr<bloom_filter> bfilter;
 	//! The perfect hash join executor (if any)
 	unique_ptr<PerfectHashJoinExecutor> perfect_join_executor;
 	//! Whether or not the hash table has been finalized
@@ -196,6 +208,7 @@ public:
 	idx_t probe_side_requirement;
 
 	//! Hash tables built by each thread
+	vector<unique_ptr<bloom_filter>> local_bfilters;
 	vector<unique_ptr<JoinHashTable>> local_hash_tables;
 
 	//! Excess probe data gathered during Sink
@@ -234,6 +247,18 @@ public:
 		}
 
 		hash_table = op.InitializeHashTable(context);
+
+		// handle LIP
+		if (op.build_bloom_filter) {
+			bloom_parameters params;
+			params.projected_element_count = std::max(op.estimated_cardinality, idx_t(64));
+			params.maximum_size = std::max(8 * op.estimated_cardinality, idx_t(64));
+			params.maximum_number_of_hashes = 1;
+			D_ASSERT(!!params);
+			params.compute_optimal_parameters();
+			bfilter = make_uniq<bloom_filter>(params);
+		}
+
 		hash_table->GetSinkCollection().InitializeAppendState(append_state);
 
 		gstate.active_local_states++;
@@ -253,6 +278,7 @@ public:
 
 	//! Thread-local HT
 	unique_ptr<JoinHashTable> hash_table;
+	unique_ptr<bloom_filter> bfilter;
 
 	unique_ptr<JoinFilterLocalState> local_filter_state;
 };
@@ -317,6 +343,17 @@ unique_ptr<LocalSinkState> PhysicalHashJoin::GetLocalSinkState(ExecutionContext 
 	return make_uniq<HashJoinLocalSinkState>(*this, context.client, gstate);
 }
 
+template <class T>
+void InsertBloom(Vector &input, idx_t count, bloom_filter &bf) {
+	UnifiedVectorFormat idata;
+	input.ToUnifiedFormat(count, idata);
+	auto *data = (T *)idata.data;
+	auto *sel = idata.sel;
+	for (idx_t i = 0; i < count; i++) {
+		bf.insert(data[sel->get_index(i)]);
+	}
+}
+
 void JoinFilterPushdownInfo::Sink(DataChunk &chunk, JoinFilterLocalState &lstate) const {
 	// if we are pushing any filters into a probe-side, compute the min/max over the columns that we are pushing
 	for (idx_t pushdown_idx = 0; pushdown_idx < join_condition.size(); pushdown_idx++) {
@@ -335,6 +372,39 @@ SinkResultType PhysicalHashJoin::Sink(ExecutionContext &context, DataChunk &chun
 	// resolve the join keys for the right chunk
 	lstate.join_keys.Reset();
 	lstate.join_key_executor.Execute(chunk, lstate.join_keys);
+
+	if (build_bloom_filter && lstate.join_keys.ColumnCount() == 1) {
+		auto type = lstate.join_keys.data[0].GetType().InternalType();
+		switch (type) {
+		case PhysicalType::BOOL:
+		case PhysicalType::INT8:
+			InsertBloom<int8_t>(lstate.join_keys.data[0], lstate.join_keys.size(), *lstate.bfilter);
+			break;
+		case PhysicalType::INT16:
+			InsertBloom<int16_t>(lstate.join_keys.data[0], lstate.join_keys.size(), *lstate.bfilter);
+			break;
+		case PhysicalType::INT32:
+			InsertBloom<int32_t>(lstate.join_keys.data[0], lstate.join_keys.size(), *lstate.bfilter);
+			break;
+		case PhysicalType::INT64:
+			InsertBloom<int64_t>(lstate.join_keys.data[0], lstate.join_keys.size(), *lstate.bfilter);
+			break;
+		case PhysicalType::UINT8:
+			InsertBloom<uint8_t>(lstate.join_keys.data[0], lstate.join_keys.size(), *lstate.bfilter);
+			break;
+		case PhysicalType::UINT16:
+			InsertBloom<uint16_t>(lstate.join_keys.data[0], lstate.join_keys.size(), *lstate.bfilter);
+			break;
+		case PhysicalType::UINT32:
+			InsertBloom<uint32_t>(lstate.join_keys.data[0], lstate.join_keys.size(), *lstate.bfilter);
+			break;
+		case PhysicalType::UINT64:
+			InsertBloom<uint64_t>(lstate.join_keys.data[0], lstate.join_keys.size(), *lstate.bfilter);
+			break;
+		default:
+			break;
+		}
+	}
 
 	if (filter_pushdown && !gstate.skip_filter_pushdown) {
 		filter_pushdown->Sink(lstate.join_keys, *lstate.local_filter_state);
@@ -363,6 +433,9 @@ SinkCombineResultType PhysicalHashJoin::Combine(ExecutionContext &context, Opera
 	lstate.hash_table->GetSinkCollection().FlushAppendState(lstate.append_state);
 	auto guard = gstate.Lock();
 	gstate.local_hash_tables.push_back(std::move(lstate.hash_table));
+	if (build_bloom_filter) {
+		gstate.local_bfilters.push_back(std::move(lstate.bfilter));
+	}
 	if (gstate.local_hash_tables.size() == gstate.active_local_states) {
 		// Set to 0 until PrepareFinalize
 		gstate.temporary_memory_state->SetZero();
@@ -846,6 +919,14 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 			for (auto &local_ht : sink.local_hash_tables) {
 				ht.Merge(*local_ht);
 			}
+			// LIP
+			if (build_bloom_filter) {
+				auto &sink_bfilter = *sink.bfilter;
+				for (auto &bfilter : sink.local_bfilters) {
+					sink_bfilter |= *bfilter;
+				}
+				sink.local_bfilters.clear();
+			}
 			sink.local_hash_tables.clear();
 			D_ASSERT(sink.temporary_memory_state->GetReservation() >= sink.probe_side_requirement);
 			sink.hash_table->PrepareExternalFinalize(sink.temporary_memory_state->GetReservation() -
@@ -861,6 +942,13 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 		ht.Merge(*local_ht);
 	}
 	sink.local_hash_tables.clear();
+	if (build_bloom_filter) {
+		auto &sink_bfilter = *sink.bfilter;
+		for (auto &bfilter : sink.local_bfilters) {
+			sink_bfilter |= *bfilter;
+		}
+		sink.local_bfilters.clear();
+	}
 	ht.Unpartition();
 
 	Value min;
@@ -876,6 +964,7 @@ SinkFinalizeType PhysicalHashJoin::Finalize(Pipeline &pipeline, Event &event, Cl
 
 	// check for possible perfect hash table
 	auto use_perfect_hash = sink.perfect_join_executor->CanDoPerfectHashJoin(*this, min, max);
+	use_perfect_hash = false;
 	if (use_perfect_hash) {
 		D_ASSERT(ht.equality_types.size() == 1);
 		auto key_type = ht.equality_types[0];
@@ -903,6 +992,11 @@ public:
 	}
 
 	DataChunk lhs_join_keys;
+
+	// LIP
+	DataChunk bloom_keys;
+	SelectionVector sel;
+
 	TupleDataChunkState join_key_state;
 	DataChunk lhs_output;
 
@@ -929,6 +1023,15 @@ unique_ptr<OperatorState> PhysicalHashJoin::GetOperatorState(ExecutionContext &c
 	if (!lhs_output_columns.col_types.empty()) {
 		state->lhs_output.Initialize(allocator, lhs_output_columns.col_types);
 	}
+	if (build_bloom_filter) {
+		state->sel.Initialize();
+		state->bloom_keys.Initialize(allocator, condition_types);
+		if (sink.perfect_join_executor) {
+			for (auto &cond : conditions) {
+				state->probe_executor.AddExpression(*cond.left);
+			}
+		}
+	}
 	if (sink.perfect_join_executor) {
 		state->perfect_hash_join_state = sink.perfect_join_executor->GetOperatorState(context);
 	} else {
@@ -946,6 +1049,64 @@ unique_ptr<OperatorState> PhysicalHashJoin::GetOperatorState(ExecutionContext &c
 	}
 
 	return std::move(state);
+}
+
+template <class T>
+void ProbeBloom(Vector &keys, DataChunk &input, DataChunk &chunk, SelectionVector &sel, idx_t count, bloom_filter &bf) {
+	UnifiedVectorFormat idata;
+	keys.ToUnifiedFormat(count, idata);
+	auto *data = (T *)idata.data;
+	auto *lsel = idata.sel;
+	auto *sel_vector = sel.data();
+
+	idx_t tuple_count = 0;
+	for (idx_t i = 0; i < count; i++) {
+		if (bf.contains(data[lsel->get_index(i)])) {
+			sel_vector[tuple_count++] = i;
+		}
+	}
+
+	if (tuple_count > 0) {
+		chunk.Slice(input, sel, tuple_count);
+	}
+}
+
+void PhysicalHashJoin::ProbeBloomFilter(DataChunk &input, DataChunk &chunk, OperatorState &state_p) const {
+	auto &state = (HashJoinOperatorState &)state_p;
+	auto &sink = (HashJoinGlobalSinkState &)*sink_state;
+
+	D_ASSERT(state.probe_executor.expressions.size() == 1); // TODO: just skip if more than 1
+
+	auto type = state.bloom_keys.data[0].GetType().InternalType();
+	switch (type) {
+	case PhysicalType::BOOL:
+	case PhysicalType::INT8:
+		ProbeBloom<int8_t>(input.data[bloom_probe_idx], input, chunk, state.sel, input.size(), *sink.bfilter);
+		break;
+	case PhysicalType::INT16:
+		ProbeBloom<int16_t>(input.data[bloom_probe_idx], input, chunk, state.sel, input.size(), *sink.bfilter);
+		break;
+	case PhysicalType::INT32:
+		ProbeBloom<int32_t>(input.data[bloom_probe_idx], input, chunk, state.sel, input.size(), *sink.bfilter);
+		break;
+	case PhysicalType::INT64:
+		ProbeBloom<int64_t>(input.data[bloom_probe_idx], input, chunk, state.sel, input.size(), *sink.bfilter);
+		break;
+	case PhysicalType::UINT8:
+		ProbeBloom<uint8_t>(input.data[bloom_probe_idx], input, chunk, state.sel, input.size(), *sink.bfilter);
+		break;
+	case PhysicalType::UINT16:
+		ProbeBloom<uint16_t>(input.data[bloom_probe_idx], input, chunk, state.sel, input.size(), *sink.bfilter);
+		break;
+	case PhysicalType::UINT32:
+		ProbeBloom<uint32_t>(input.data[bloom_probe_idx], input, chunk, state.sel, input.size(), *sink.bfilter);
+		break;
+	case PhysicalType::UINT64:
+		ProbeBloom<uint64_t>(input.data[bloom_probe_idx], input, chunk, state.sel, input.size(), *sink.bfilter);
+		break;
+	default:
+		break;
+	}
 }
 
 OperatorResultType PhysicalHashJoin::ExecuteInternal(ExecutionContext &context, DataChunk &input, DataChunk &chunk,

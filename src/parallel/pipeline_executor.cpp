@@ -8,6 +8,8 @@
 #include <thread>
 #endif
 
+#include <iostream>
+
 namespace duckdb {
 
 PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_p)
@@ -47,6 +49,21 @@ PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_
 		}
 	}
 	InitializeChunk(final_chunk);
+
+	// Handle LIP
+	if (pipeline.is_lip_pipeline) {
+		auto &first_chunk = pipeline.operators.empty() ? final_chunk : *intermediate_chunks[0];
+		for (idx_t i = 0; i < pipeline.operators.size(); i++) {
+			auto &op = pipeline.operators[i].get();
+			if (op.type == PhysicalOperatorType::HASH_JOIN && ((PhysicalHashJoin &)op).build_bloom_filter) {
+				lip_join_idxs.push_back(i);
+				auto chunk = make_uniq<DataChunk>();
+				chunk->Initialize(Allocator::Get(context.client), first_chunk.GetTypes());
+				lip_chunks.push_back(std::move(chunk));
+				lip_statistics.emplace(i, make_pair(0, 0));
+			}
+		}
+	}
 }
 
 bool PipelineExecutor::TryFlushCachingOperators(ExecutionBudget &chunk_budget) {
@@ -524,20 +541,88 @@ SinkResultType PipelineExecutor::Sink(DataChunk &chunk, OperatorSinkInput &input
 SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
 	StartOperator(*pipeline.source);
 
-	OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
-	auto res = GetData(result, source_input);
+	SourceResultType res;
+	bool fetch_data = true;
+	while (fetch_data) {
+		fetch_data = pipeline.is_lip_pipeline;
 
-	// Ensures Sinks only return empty results when Blocking or Finished
+		auto &source_result = pipeline.is_lip_pipeline ? *lip_chunks[0] : result;
+		if (pipeline.is_lip_pipeline) {
+			source_result.Reset();
+		}
+
+		OperatorSourceInput source_input = {*pipeline.source_state, *local_source_state, interrupt_state};
+		res = pipeline.source->GetData(context, source_result, source_input);
+
+		if (source_result.size() == 0) {
+			break;
+		}
+
+		if (pipeline.is_lip_pipeline) {
+			lip_counter++;
+			auto &operators = pipeline.operators;
+			for (idx_t i = 0; i < lip_join_idxs.size(); i++) {
+				auto &next_chunk = i == lip_join_idxs.size() - 1 ? result : *lip_chunks[i + 1];
+				next_chunk.Reset();
+				idx_t join_idx = lip_join_idxs[i];
+				auto &join = (PhysicalHashJoin &)(operators[join_idx].get());
+				join.ProbeBloomFilter(*lip_chunks[i], next_chunk, *intermediate_states[join_idx]);
+				lip_statistics[join_idx].first += lip_chunks[i]->size();
+				lip_statistics[join_idx].second += lip_chunks[i]->size() - next_chunk.size();
+				if (next_chunk.size() == 0) {
+					break;
+				}
+			}
+
+			// Re-order
+			if (lip_counter % LIP_THRESHOLD == 0) {
+				std::sort(lip_join_idxs.begin(), lip_join_idxs.end(), [&](idx_t a, idx_t b) {
+					double miss_rate_a =
+					    lip_statistics[a].first == 0 ? 1 : (double)lip_statistics[a].second / lip_statistics[a].first;
+					double miss_rate_b =
+					    lip_statistics[b].first == 0 ? 1 : (double)lip_statistics[b].second / lip_statistics[b].first;
+					return miss_rate_a > miss_rate_b;
+				});
+			}
+
+			// Reset
+			if (lip_counter >= LIP_THRESHOLD) {
+				for (auto &statistic : lip_statistics) {
+					statistic.second.first = 0;
+					statistic.second.second = 0;
+				}
+				lip_counter = 0;
+			}
+
+			fetch_data = (result.size() == 0);
+		}
+	}
+
 	D_ASSERT(res != SourceResultType::BLOCKED || result.size() == 0);
 
 	EndOperator(*pipeline.source, &result);
-
 	return res;
 }
 
 void PipelineExecutor::InitializeChunk(DataChunk &chunk) {
 	auto &last_op = pipeline.operators.empty() ? *pipeline.source : pipeline.operators.back().get();
 	chunk.Initialize(Allocator::DefaultAllocator(), last_op.GetTypes());
+
+	if (pipeline.is_lip_pipeline) {
+		auto &first_chunk = pipeline.operators.empty() ? final_chunk : *intermediate_chunks[0];
+		for (idx_t i = 0; i < pipeline.operators.size(); i++) {
+			auto op = pipeline.operators[i];
+			if (op.get().type == PhysicalOperatorType::HASH_JOIN &&
+			    static_cast<PhysicalHashJoin &>(op.get()).build_bloom_filter) {
+
+				lip_join_idxs.push_back(i);
+				auto chunk = make_uniq<DataChunk>();
+				chunk->Initialize(Allocator::Get(context.client), first_chunk.GetTypes());
+				lip_chunks.push_back(std::move(chunk));
+				lip_statistics.emplace(i, make_pair(0, 0));
+			}
+		}
+	}
 }
 
 void PipelineExecutor::StartOperator(PhysicalOperator &op) {

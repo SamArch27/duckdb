@@ -1,5 +1,7 @@
+#include "duckdb/planner/expression/bound_cast_expression.hpp"
 #include "duckdb/execution/operator/join/physical_join.hpp"
-
+#include "duckdb/execution/operator/scan/physical_table_scan.hpp"
+#include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/operator/join/physical_hash_join.hpp"
 #include "duckdb/parallel/meta_pipeline.hpp"
 #include "duckdb/parallel/pipeline.hpp"
@@ -54,6 +56,80 @@ void PhysicalJoin::BuildJoinPipelines(Pipeline &current, MetaPipeline &meta_pipe
 			// this prevents breadth-first plan evaluation
 			child_meta_pipeline.GetPipelines(dependencies, false);
 			last_child_ptr = meta_pipeline.GetLastChild();
+		}
+	}
+
+	bool add_child_pipeline = false;
+	if (op.type != PhysicalOperatorType::CROSS_PRODUCT) {
+		auto &join_op = (PhysicalJoin &)op;
+		if (IsRightOuterJoin(join_op.join_type)) {
+			add_child_pipeline = true;
+		}
+		if (join_op.type == PhysicalOperatorType::HASH_JOIN) {
+			auto &hash_join_op = (PhysicalHashJoin &)join_op;
+
+			if (!IsRightOuterJoin(join_op.join_type) && join_op.join_type != JoinType::ANTI &&
+			    join_op.join_type != JoinType::MARK) {
+				add_child_pipeline = true;
+			}
+
+			if (hash_join_op.join_type != JoinType::MARK && hash_join_op.conditions.size() == 1) {
+				if (hash_join_op.children[1]->type != PhysicalOperatorType::TABLE_SCAN) {
+					hash_join_op.build_bloom_filter = true;
+				} else {
+					auto &scan = (PhysicalTableScan &)*hash_join_op.children[1];
+					if (scan.table_filters && !scan.table_filters->filters.empty()) {
+						hash_join_op.build_bloom_filter = true;
+					}
+				}
+
+				auto *left_expr = hash_join_op.conditions[0].left.get();
+				idx_t probe_idx = 0;
+
+				if (left_expr->type == ExpressionType::CAST) {
+					left_expr = dynamic_cast<BoundCastExpression *>(left_expr)->child.get();
+				}
+
+				if (left_expr->type == ExpressionType::BOUND_REF) {
+					auto *ref_expression = dynamic_cast<BoundReferenceExpression *>(left_expr);
+					probe_idx = ref_expression->index;
+				} else {
+					hash_join_op.build_bloom_filter = false;
+				}
+
+				PhysicalOperator *leftmost_child = hash_join_op.children[0].get();
+				while (hash_join_op.build_bloom_filter && !leftmost_child->children.empty()) {
+					if (leftmost_child->type == PhysicalOperatorType::PROJECTION) {
+						auto *proj = (PhysicalProjection *)leftmost_child;
+						if (probe_idx >= proj->select_list.size()) {
+							hash_join_op.build_bloom_filter = false;
+						} else {
+							Expression *expr = &*proj->select_list[probe_idx];
+							if (expr->type == ExpressionType::CAST) {
+								auto *cast = dynamic_cast<BoundCastExpression *>(&*proj->select_list[probe_idx]);
+								expr = &*cast->child;
+							}
+							if (expr->type == ExpressionType::BOUND_REF) {
+								auto *ref = dynamic_cast<BoundReferenceExpression *>(expr);
+								probe_idx = ref->index;
+							} else {
+								hash_join_op.build_bloom_filter = false;
+							}
+						}
+					}
+					leftmost_child = leftmost_child->children[0].get();
+				}
+
+				if (probe_idx >= leftmost_child->GetTypes().size()) {
+					hash_join_op.build_bloom_filter = false;
+				} else {
+					hash_join_op.bloom_probe_idx = probe_idx;
+				}
+			}
+		}
+
+		if (add_child_pipeline) {
+			meta_pipeline.CreateChildPipeline(current, op, last_pipeline);
 		}
 	}
 
