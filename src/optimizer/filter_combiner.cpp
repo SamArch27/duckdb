@@ -96,7 +96,13 @@ FilterResult FilterCombiner::AddFilter(unique_ptr<Expression> expr) {
 	auto result = AddFilter(*expr);
 	if (result == FilterResult::UNSUPPORTED) {
 		// unsupported filter, push into remaining filters
-		remaining_filters.push_back(std::move(expr));
+		// if it's a UDF make sure we aren't duplicating the UDF expression
+		if (!expr->ContainsUDF() || std::none_of(remaining_filters.begin(), remaining_filters.end(),
+		                                         [&expr](const unique_ptr<Expression> &remaining) {
+			                                         return Expression::Equals(remaining, expr);
+		                                         })) {
+			remaining_filters.push_back(std::move(expr));
+		}
 		return FilterResult::SUCCESS;
 	}
 	return result;

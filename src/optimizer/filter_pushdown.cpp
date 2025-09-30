@@ -1,9 +1,6 @@
 #include "duckdb/optimizer/filter_pushdown.hpp"
 #include "duckdb/optimizer/filter_combiner.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
-#include "duckdb/planner/joinside.hpp"
-#include "duckdb/planner/expression/bound_comparison_expression.hpp"
-#include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_aggregate.hpp"
@@ -11,7 +8,7 @@
 #include "duckdb/planner/operator/logical_join.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/operator/logical_window.hpp"
-#include <iostream>
+
 namespace duckdb {
 
 using Filter = FilterPushdown::Filter;
@@ -92,148 +89,55 @@ void FilterPushdown::CheckMarkToSemi(LogicalOperator &op, unordered_set<idx_t> &
 	}
 }
 
-FilterPushdown::FilterPushdown(Optimizer &optimizer, bool udf_filter_pushdown, bool convert_mark_joins)
-    : optimizer(optimizer), combiner(optimizer.context), udf_filter_pushdown(udf_filter_pushdown),
-      convert_mark_joins(convert_mark_joins) {
+FilterPushdown::FilterPushdown(Optimizer &optimizer, bool convert_mark_joins)
+    : optimizer(optimizer), combiner(optimizer.context), convert_mark_joins(convert_mark_joins) {
 }
 
 unique_ptr<LogicalOperator> FilterPushdown::Rewrite(unique_ptr<LogicalOperator> op) {
 	D_ASSERT(!combiner.HasFilters());
-	unique_ptr<LogicalOperator> result;
-	vector<unique_ptr<Expression>> udf_expressions;
-
-	if (udf_filter_pushdown) {
-		for (auto &filter : filters) {
-			if (filter) {
-				if (auto &expr = filter->filter) {
-					if (expr->ContainsUDF()) {
-						if (std::any_of(
-						        udf_expressions.begin(), udf_expressions.end(),
-						        [&](unique_ptr<Expression> &udf_expr) { return Expression::Equals(udf_expr, expr); })) {
-							continue;
-						}
-						udf_expressions.push_back(expr->Copy());
-					}
-				}
-			}
-		}
-	}
-
 	switch (op->type) {
 	case LogicalOperatorType::LOGICAL_AGGREGATE_AND_GROUP_BY:
-		result = PushdownAggregate(std::move(op));
-		break;
-	case LogicalOperatorType::LOGICAL_FILTER: {
-		// if the filter contains only udf predicates we are pushing down already, don't add the filter again
-		if (udf_filter_pushdown) {
-			auto &exprs = op->Cast<LogicalFilter>().expressions;
-			if (std::all_of(exprs.begin(), exprs.end(), [&](unique_ptr<Expression> &expr) {
-				    for (auto &udf_expr : udf_expressions) {
-					    if (Expression::Equals(udf_expr, expr)) {
-						    return true;
-					    }
-				    }
-				    return false;
-			    })) {
-				return PushdownFilter(std::move(op));
-			}
-		}
-		result = PushdownFilter(std::move(op));
-		break;
-	}
+		return PushdownAggregate(std::move(op));
+	case LogicalOperatorType::LOGICAL_FILTER:
+		return PushdownFilter(std::move(op));
 	case LogicalOperatorType::LOGICAL_CROSS_PRODUCT:
-		result = PushdownCrossProduct(std::move(op));
-		break;
+		return PushdownCrossProduct(std::move(op));
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
 	case LogicalOperatorType::LOGICAL_ANY_JOIN:
 	case LogicalOperatorType::LOGICAL_ASOF_JOIN:
 	case LogicalOperatorType::LOGICAL_DELIM_JOIN:
-		result = PushdownJoin(std::move(op));
-		break;
+		return PushdownJoin(std::move(op));
 	case LogicalOperatorType::LOGICAL_PROJECTION:
-		result = PushdownProjection(std::move(op));
-		break;
+		return PushdownProjection(std::move(op));
 	case LogicalOperatorType::LOGICAL_INTERSECT:
 	case LogicalOperatorType::LOGICAL_EXCEPT:
 	case LogicalOperatorType::LOGICAL_UNION:
-		result = PushdownSetOperation(std::move(op));
-		break;
+		return PushdownSetOperation(std::move(op));
 	case LogicalOperatorType::LOGICAL_DISTINCT:
-		result = PushdownDistinct(std::move(op));
-		break;
+		return PushdownDistinct(std::move(op));
 	case LogicalOperatorType::LOGICAL_ORDER_BY:
 		// we can just push directly through these operations without any rewriting
 		op->children[0] = Rewrite(std::move(op->children[0]));
-		result = std::move(op);
-		break;
+		return op;
 	case LogicalOperatorType::LOGICAL_MATERIALIZED_CTE: {
 		// we can't push filters into the materialized CTE (LHS), but we do want to recurse into it
-		FilterPushdown pushdown(optimizer, udf_filter_pushdown, convert_mark_joins);
+		FilterPushdown pushdown(optimizer, convert_mark_joins);
 		op->children[0] = pushdown.Rewrite(std::move(op->children[0]));
 		// we can push filters into the rest of the query plan (RHS)
 		op->children[1] = Rewrite(std::move(op->children[1]));
-		result = std::move(op);
-		break;
+		return op;
 	}
 	case LogicalOperatorType::LOGICAL_GET:
-		result = PushdownGet(std::move(op));
-		break;
+		return PushdownGet(std::move(op));
 	case LogicalOperatorType::LOGICAL_LIMIT:
-		result = PushdownLimit(std::move(op));
-		break;
+		return PushdownLimit(std::move(op));
 	case LogicalOperatorType::LOGICAL_WINDOW:
-		result = PushdownWindow(std::move(op));
-		break;
+		return PushdownWindow(std::move(op));
 	case LogicalOperatorType::LOGICAL_UNNEST:
-		result = PushdownUnnest(std::move(op));
-		break;
+		return PushdownUnnest(std::move(op));
 	default:
-		result = FinishPushdown(std::move(op));
-		break;
+		return FinishPushdown(std::move(op));
 	}
-
-	if (udf_filter_pushdown) {
-		// add the UDF to the join conditions
-		if (result->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-			auto &join = result->Cast<LogicalComparisonJoin>();
-
-			// check if we are pushing the UDF filter to the left or the right side
-			bool pushing_left = true;
-			if (join.children[1]->type == LogicalOperatorType::LOGICAL_FILTER) {
-				auto &filter = join.children[1]->Cast<LogicalFilter>();
-				if (filter.IsUDFFilter()) {
-					pushing_left = false;
-				}
-			}
-
-			for (auto &expr : udf_expressions) {
-				if (expr->expression_class == ExpressionClass::BOUND_COMPARISON) {
-					// Convert to either
-					// (1) TRUE = (udf_cond)
-					// (2) (udf_cond) = TRUE
-					// depending on whether we are pushing down the UDF filter through the LHS or RHS
-					auto &cond_expr = expr->Cast<BoundComparisonExpression>();
-					JoinCondition cond;
-					cond.comparison = ExpressionType::COMPARE_EQUAL;
-					cond.left = pushing_left ? cond_expr.Copy() : make_uniq<BoundConstantExpression>(Value(true));
-					cond.right = pushing_left ? make_uniq<BoundConstantExpression>(Value(true)) : cond_expr.Copy();
-					join.conditions.push_back(std::move(cond));
-				}
-			}
-		}
-
-		// attach UDF filters above
-		for (auto &expr : udf_expressions) {
-			auto dup_filter = make_uniq<LogicalFilter>();
-			if (result->has_estimated_cardinality) {
-				dup_filter->SetEstimatedCardinality(result->estimated_cardinality);
-			}
-			dup_filter->expressions.push_back(expr->Copy());
-			dup_filter->children.push_back(std::move(result));
-			result = std::move(dup_filter);
-		}
-	}
-	return result;
 }
 
 ClientContext &FilterPushdown::GetContext() {
@@ -323,10 +227,10 @@ unique_ptr<LogicalOperator> FilterPushdown::AddLogicalFilter(unique_ptr<LogicalO
 		// set the filter's estimated cardinality as the child op's.
 		// if the filter is created during the filter pushdown optimization, the estimated cardinality will be later
 		// overridden during the join order optimization to a more accurate one.
-		// if the filter is created during the statistics propagation, the estimated cardinality won't be set unless
-		// set here. assuming the filters introduced during the statistics propagation have little effect in
-		// reducing the cardinality, we adopt the the cardinality of the child. this could be improved by MinMax
-		// info from the statistics propagation
+		// if the filter is created during the statistics propagation, the estimated cardinality won't be set unless set
+		// here. assuming the filters introduced during the statistics propagation have little effect in reducing the
+		// cardinality, we adopt the the cardinality of the child. this could be improved by MinMax info from the
+		// statistics propagation
 		filter->SetEstimatedCardinality(op->estimated_cardinality);
 	}
 	filter->expressions = std::move(expressions);
@@ -337,21 +241,16 @@ unique_ptr<LogicalOperator> FilterPushdown::AddLogicalFilter(unique_ptr<LogicalO
 unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalOperator> op) {
 	vector<unique_ptr<Expression>> expressions;
 	for (auto &f : filters) {
-		if (std::any_of(expressions.begin(), expressions.end(),
-		                [&](unique_ptr<Expression> &expr) { return Expression::Equals(expr, f->filter); })) {
-			continue;
-		}
 		expressions.push_back(std::move(f->filter));
 	}
 
-	auto filter_op = AddLogicalFilter(std::move(op), std::move(expressions));
-	return filter_op;
+	return AddLogicalFilter(std::move(op), std::move(expressions));
 }
 
 unique_ptr<LogicalOperator> FilterPushdown::FinishPushdown(unique_ptr<LogicalOperator> op) {
 	// unhandled type, first perform filter pushdown in its children
 	for (auto &child : op->children) {
-		FilterPushdown pushdown(optimizer, udf_filter_pushdown, convert_mark_joins);
+		FilterPushdown pushdown(optimizer, convert_mark_joins);
 		child = pushdown.Rewrite(std::move(child));
 	}
 	// now push any existing filters

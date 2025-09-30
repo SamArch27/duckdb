@@ -9,61 +9,37 @@ using Filter = FilterPushdown::Filter;
 unique_ptr<LogicalOperator> FilterPushdown::PushdownFilter(unique_ptr<LogicalOperator> op) {
 	D_ASSERT(op->type == LogicalOperatorType::LOGICAL_FILTER);
 	auto &filter = op->Cast<LogicalFilter>();
+
 	if (filter.HasProjectionMap()) {
 		return FinishPushdown(std::move(op));
 	}
-
-	// add UDF filters to the FilterCombiner, skip everything else
-	if (udf_filter_pushdown) {
-		for (auto &expression : filter.expressions) {
-			// skip non-UDF filters
-			if (!expression->ContainsUDF()) {
-				continue;
-			}
-			// add the UDF filters for pushdown
-			if (AddFilter(std::move(expression)) == FilterResult::UNSATISFIABLE) {
-				// filter statically evaluates to false, strip tree
-				return make_uniq<LogicalEmptyResult>(std::move(op));
-			}
-		}
-		// push down those UDF filters
-		GenerateFilters();
-		return Rewrite(std::move(filter.children[0]));
-	}
-
-	// otherwise add the non-UDF filters to the FilterCombiner
-	vector<unique_ptr<Expression>> udf_filters;
+	vector<unique_ptr<Expression>> udf_expressions;
+	// filter: gather the filters and remove the filter from the set of operations
 	for (auto &expression : filter.expressions) {
-		// skip non-UDF filters
+		// copy any UDF expressions
 		if (expression->ContainsUDF()) {
-			udf_filters.push_back(expression->Copy());
-			continue;
+			udf_expressions.push_back(expression->Copy());
 		}
-		// add the non-UDF filters for pushdown
 		if (AddFilter(std::move(expression)) == FilterResult::UNSATISFIABLE) {
 			// filter statically evaluates to false, strip tree
 			return make_uniq<LogicalEmptyResult>(std::move(op));
 		}
 	}
-
-	// push down the non-UDF filters
 	GenerateFilters();
+	auto child = Rewrite(std::move(filter.children[0]));
 
-	// clear the current filter node
-	filter.expressions.clear();
-
-	// rewrite the child
-	auto new_child = Rewrite(std::move(filter.children[0]));
-
-	// for each UDF create a new filter node and add it above the current one
-	unique_ptr<LogicalOperator> current_op = std::move(new_child);
-	for (auto &expr : udf_filters) {
-		auto udf_filter = make_uniq<LogicalFilter>();
-		udf_filter->expressions.push_back(std::move(expr));
-		udf_filter->children.push_back(std::move(current_op));
-		current_op = std::move(udf_filter);
+	if (udf_expressions.empty()) {
+		return child;
 	}
-	return current_op;
+
+	// keep the UDF filter at the top
+	auto parent = make_uniq<LogicalFilter>();
+	if (child->has_estimated_cardinality) {
+		parent->SetEstimatedCardinality(child->estimated_cardinality);
+	}
+	parent->expressions = std::move(udf_expressions);
+	parent->children.push_back(std::move(child));
+	return std::move(parent);
 }
 
 } // namespace duckdb

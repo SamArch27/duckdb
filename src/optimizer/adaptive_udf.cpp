@@ -8,6 +8,7 @@
 #include "duckdb/common/queue.hpp"
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/main/config.hpp"
+#include <iostream>
 
 namespace duckdb {
 
@@ -60,24 +61,56 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 	vector<LogicalOperator *> stream;
 	stream.push_back(match);
 	while (true) {
-		auto it = parent.find(stream.back());
+		auto prev = stream.back();
+		auto it = parent.find(prev);
 		if (it == parent.end()) {
 			break;
 		}
-		stream.push_back(it->second);
+		auto curr = it->second;
+		stream.push_back(curr);
+	}
+	std::reverse(stream.begin(), stream.end());
+
+	vector<LogicalOperator *> new_stream;
+	new_stream.push_back(stream.front());
+	for (idx_t i = 1; i < stream.size(); ++i) {
+		auto *prev = stream[i - 1];
+		auto *curr = stream[i];
+
+		// need to stick a UDF filter between them
+		if (prev->type != LogicalOperatorType::LOGICAL_FILTER && curr->type != LogicalOperatorType::LOGICAL_FILTER) {
+			// check which child it is
+			auto index = (prev->children[0].get() == curr) ? 0 : 1;
+			// save the old child
+			auto child = std::move(prev->children[index]);
+			// clone the UDF filter and assign it as the new child
+			prev->children[index] = match->Copy(optimizer.GetContext());
+			// set the UDF filter's child to be the old child
+			prev->children[index]->children[0] = std::move(child);
+			// add it to the new stream
+			new_stream.push_back(prev->children[index].get());
+		}
+
+		// unconditionally add the current
+		new_stream.push_back(curr);
 	}
 
+	// lastly clear the duplicate UDF filter at the bottom
+	match->children[0]->expressions.clear();
+
+	// reverse the stream so it's bottom to top again
+	std::reverse(new_stream.begin(), new_stream.end());
+
 	auto placement = 0;
-	for (idx_t i = 0; i < stream.size(); ++i) {
-		auto &op = stream[i];
-		switch (op->type) {
-		case LogicalOperatorType::LOGICAL_FILTER: {
+	for (idx_t i = 0; i < new_stream.size(); ++i) {
+		auto &op = new_stream[i];
+		if (op->type == LogicalOperatorType::LOGICAL_FILTER) {
 			auto &filter = op->Cast<LogicalFilter>();
 			if (filter.IsUDFFilter()) {
 				++placement;
 
-				// clear all UDF filters except for the very last one
-				if (fixed_placement == 0 && i + 1 == stream.size()) {
+				// if fixed_placement is not specified then keep all filters
+				if (fixed_placement == 0) {
 					continue;
 				}
 				// if the position is hardcoded then clear any other filters
@@ -85,38 +118,6 @@ unique_ptr<LogicalOperator> AdaptiveUDF::RewriteUDFSubPlan(unique_ptr<LogicalOpe
 					filter.expressions.clear();
 				}
 			}
-			break;
-		}
-		case LogicalOperatorType::LOGICAL_COMPARISON_JOIN: {
-			auto &join = op->Cast<LogicalComparisonJoin>();
-			auto &conds = join.conditions;
-			// erase any UDF conditions in non-pipeline breaking joins (coming from the LHS)
-			conds.erase(std::remove_if(conds.begin(), conds.end(),
-			                           [&](const JoinCondition &cond) {
-				                           return cond.left->ContainsUDF() ||
-				                                  (fixed_placement != 0 && cond.right->ContainsUDF());
-			                           }),
-			            conds.end());
-
-			if (fixed_placement) {
-			}
-
-			// remove duplicates
-			vector<JoinCondition> new_conds;
-			for (auto &cond : conds) {
-				if (std::any_of(new_conds.begin(), new_conds.end(), [&](const JoinCondition &new_cond) {
-					    return new_cond.comparison == cond.comparison && Expression::Equals(new_cond.left, cond.left) &&
-					           Expression::Equals(new_cond.right, cond.right);
-				    })) {
-					continue;
-				}
-				new_conds.push_back(std::move(cond));
-			}
-			join.conditions = std::move(new_conds);
-			break;
-		}
-		default:
-			throw NotImplementedException("Unsupported operator in stream!");
 		}
 	}
 

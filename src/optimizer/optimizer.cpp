@@ -133,7 +133,7 @@ void Optimizer::RunBuiltInOptimizers() {
 
 	// perform filter pushdown
 	RunOptimizer(OptimizerType::FILTER_PUSHDOWN, [&]() {
-		FilterPushdown filter_pushdown(*this, false);
+		FilterPushdown filter_pushdown(*this);
 		unordered_set<idx_t> top_bindings;
 		filter_pushdown.CheckMarkToSemi(*plan, top_bindings);
 		plan = filter_pushdown.Rewrite(std::move(plan));
@@ -172,15 +172,6 @@ void Optimizer::RunBuiltInOptimizers() {
 	RunOptimizer(OptimizerType::JOIN_ORDER, [&]() {
 		JoinOrderOptimizer optimizer(context);
 		plan = optimizer.Optimize(std::move(plan));
-	});
-
-	// perform udf filter pushdown
-	RunOptimizer(OptimizerType::FILTER_PUSHDOWN, [&]() {
-		// The boolean indicates that it is the udf version.
-		FilterPushdown filter_pushdown(*this, true);
-		unordered_set<idx_t> top_bindings;
-		filter_pushdown.CheckMarkToSemi(*plan, top_bindings);
-		plan = filter_pushdown.Rewrite(std::move(plan));
 	});
 
 	// rewrites UNNESTs in DelimJoins by moving them to the projection
@@ -276,7 +267,7 @@ void Optimizer::RunBuiltInOptimizers() {
 		join_filter_pushdown.VisitOperator(*plan);
 	});
 
-	// perform UDF plan rewriting (adaptivity)
+	// perform UDF plan rewriting
 	RunOptimizer(OptimizerType::ADAPTIVE_UDF, [&]() {
 		AdaptiveUDF adaptive_udf(*this, DBConfig::GetConfig(context).options.best_udf_placement);
 		plan = adaptive_udf.Rewrite(std::move(plan));
