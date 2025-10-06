@@ -59,20 +59,10 @@ void PhysicalJoin::BuildJoinPipelines(Pipeline &current, MetaPipeline &meta_pipe
 		}
 	}
 
-	bool add_child_pipeline = false;
 	if (op.type != PhysicalOperatorType::CROSS_PRODUCT) {
 		auto &join_op = (PhysicalJoin &)op;
-		if (IsRightOuterJoin(join_op.join_type)) {
-			add_child_pipeline = true;
-		}
 		if (join_op.type == PhysicalOperatorType::HASH_JOIN) {
 			auto &hash_join_op = (PhysicalHashJoin &)join_op;
-
-			if (!IsRightOuterJoin(join_op.join_type) && join_op.join_type != JoinType::ANTI &&
-			    join_op.join_type != JoinType::MARK) {
-				add_child_pipeline = true;
-			}
-
 			if (hash_join_op.join_type != JoinType::MARK && hash_join_op.conditions.size() == 1) {
 				if (hash_join_op.children[1]->type != PhysicalOperatorType::TABLE_SCAN) {
 					hash_join_op.build_bloom_filter = true;
@@ -126,10 +116,6 @@ void PhysicalJoin::BuildJoinPipelines(Pipeline &current, MetaPipeline &meta_pipe
 					hash_join_op.bloom_probe_idx = probe_idx;
 				}
 			}
-		}
-
-		if (add_child_pipeline) {
-			meta_pipeline.CreateChildPipeline(current, op, last_pipeline);
 		}
 	}
 
