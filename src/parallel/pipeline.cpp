@@ -246,11 +246,14 @@ void Pipeline::Ready() {
 	std::reverse(operators.begin(), operators.end());
 
 	// check if the pipeline is "LIP"-able
-	for (auto op : operators) {
-		if (op.get().type == PhysicalOperatorType::HASH_JOIN) {
-			auto &hj = (PhysicalHashJoin &)op.get();
-			if (hj.build_bloom_filter) {
-				is_lip_pipeline = true;
+	bool lip_enabled = DBConfig::GetConfig(GetClientContext()).options.lip;
+	if (lip_enabled) {
+		for (auto op : operators) {
+			if (op.get().type == PhysicalOperatorType::HASH_JOIN) {
+				auto &hj = (PhysicalHashJoin &)op.get();
+				if (hj.build_bloom_filter) {
+					is_lip_pipeline = true;
+				}
 			}
 		}
 	}

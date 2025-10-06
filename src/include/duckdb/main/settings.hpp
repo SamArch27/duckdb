@@ -1195,6 +1195,16 @@ struct UDFCachingSetting {
 	static Value GetSetting(const ClientContext &context);
 };
 
+struct LIPSetting {
+	using RETURN_TYPE = bool;
+	static constexpr const char *Name = "lip";
+	static constexpr const char *Description = "Whether to use lip.";
+	static constexpr const char *InputType = "BOOLEAN";
+	static void SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &parameter);
+	static void ResetGlobal(DatabaseInstance *db, DBConfig &config);
+	static Value GetSetting(const ClientContext &context);
+};
+
 struct BestUDFPlacementSetting {
 	using RETURN_TYPE = int64_t;
 	static constexpr const char *Name = "best";

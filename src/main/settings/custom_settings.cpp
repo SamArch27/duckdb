@@ -1387,6 +1387,23 @@ Value UDFCachingSetting::GetSetting(const ClientContext &context) {
 }
 
 //===----------------------------------------------------------------------===//
+// LIP
+//===----------------------------------------------------------------------===//
+void LIPSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {
+	auto new_val = input.GetValue<bool>();
+	config.options.lip = new_val;
+}
+
+void LIPSetting::ResetGlobal(DatabaseInstance *db, DBConfig &config) {
+	config.options.lip = true;
+}
+
+Value LIPSetting::GetSetting(const ClientContext &context) {
+	auto &config = DBConfig::GetConfig(context);
+	return Value::BOOLEAN(NumericCast<bool>(config.options.lip));
+}
+
+//===----------------------------------------------------------------------===//
 // Best UDF Placement
 //===----------------------------------------------------------------------===//
 void BestUDFPlacementSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {

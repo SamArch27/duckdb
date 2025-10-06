@@ -159,6 +159,8 @@ struct DBConfigOptions {
 	int64_t best_udf_placement = 0;
 	//! Whether to cache UDF calls
 	bool udf_caching = true;
+	//! Whether to use LIP
+	bool lip = true;
 	//! The maximum amount of CPU threads used by the database system. Default: all available.
 	idx_t maximum_threads = DConstants::INVALID_INDEX;
 	//! The number of external threads that work on DuckDB tasks. Default: 1.

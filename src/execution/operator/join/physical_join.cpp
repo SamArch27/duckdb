@@ -63,7 +63,8 @@ void PhysicalJoin::BuildJoinPipelines(Pipeline &current, MetaPipeline &meta_pipe
 		auto &join_op = (PhysicalJoin &)op;
 		if (join_op.type == PhysicalOperatorType::HASH_JOIN) {
 			auto &hash_join_op = (PhysicalHashJoin &)join_op;
-			if (hash_join_op.join_type != JoinType::MARK && hash_join_op.conditions.size() == 1) {
+			bool enable_lip = DBConfig::GetConfig(current.GetClientContext()).options.lip;
+			if (enable_lip && hash_join_op.join_type != JoinType::MARK && hash_join_op.conditions.size() == 1) {
 				if (hash_join_op.children[1]->type != PhysicalOperatorType::TABLE_SCAN) {
 					hash_join_op.build_bloom_filter = true;
 				} else {
