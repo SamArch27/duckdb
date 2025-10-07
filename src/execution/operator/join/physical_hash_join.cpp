@@ -30,6 +30,7 @@
 #include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/storage_manager.hpp"
 #include "duckdb/storage/temporary_memory_manager.hpp"
+#include <iostream>
 namespace duckdb {
 
 PhysicalHashJoin::PhysicalHashJoin(LogicalOperator &op, unique_ptr<PhysicalOperator> left,
@@ -353,7 +354,8 @@ SinkResultType PhysicalHashJoin::Sink(ExecutionContext &context, DataChunk &chun
 	lstate.join_key_executor.Execute(chunk, lstate.join_keys);
 
 	if (build_bloom_filter && lstate.join_keys.ColumnCount() == 1) {
-		lstate.bfilter->Insert(lstate.join_keys);
+		// Insert into bloom filter
+		lstate.bfilter->Insert(lstate.join_keys, lstate.join_keys.size());
 	}
 
 	if (filter_pushdown && !gstate.skip_filter_pushdown) {
@@ -368,7 +370,6 @@ SinkResultType PhysicalHashJoin::Sink(ExecutionContext &context, DataChunk &chun
 
 	// build the HT
 	lstate.hash_table->Build(lstate.append_state, lstate.join_keys, lstate.payload_chunk);
-
 	return SinkResultType::NEED_MORE_INPUT;
 }
 
