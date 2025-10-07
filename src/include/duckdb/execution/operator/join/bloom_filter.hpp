@@ -9,7 +9,7 @@
 
 #include "duckdb/planner/column_binding.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
-#include <iostream>
+
 #include <cstdint>
 
 #ifndef BF_RESTRICT
@@ -77,8 +77,6 @@ public:
 	uint32_t num_sectors = 0;
 	uint32_t num_sectors_log = 0;
 	uint32_t *blocks = nullptr;
-	int total = 0;
-	mutable int total_passing = 0;
 
 private:
 	// key_lo |5:bit3|5:bit2|5:bit1|  13:block    |4:sector1 | bit layout (32:total)
@@ -182,11 +180,8 @@ private:
 public:
 	void Lookup(DataChunk &input, idx_t bloom_probe_idx, SelectionVector &sel, vector<uint32_t> &lookup_results,
 	            DataChunk &output) const {
+
 		int count = static_cast<int>(input.size());
-
-		std::cout << "Bloom filter has: " << total << std::endl;
-		std::cout << "Looking up in bloom filter: " << count << std::endl;
-
 		Vector hashes = HashColumns(input, bloom_probe_idx);
 		BloomFilterLookup(count, reinterpret_cast<uint64_t *>(hashes.GetData()), blocks, lookup_results.data());
 
@@ -201,14 +196,10 @@ public:
 		} else {
 			output.Slice(input, sel, result_count);
 		}
-		total_passing += result_count;
-		std::cout << "Number of rows passing filter: " << result_count << std::endl;
-		std::cout << "Total rows passing filter: " << total_passing << std::endl;
 	}
 
 	void Insert(DataChunk &input, int count) {
-		std::cout << "Inserting into bloom filter: " << count << std::endl;
-		total += count;
+
 		auto hashes = HashColumns(input, 0);
 		BloomFilterInsert(count, reinterpret_cast<uint64_t *>(hashes.GetData()), blocks);
 	}
@@ -218,8 +209,6 @@ public:
 		for (uint32_t i = 0; i < num_sectors; i++) {
 			blocks[i] |= other.blocks[i];
 		}
-		total += other.total;
-		total_passing += other.total_passing;
 		return *this;
 	}
 };

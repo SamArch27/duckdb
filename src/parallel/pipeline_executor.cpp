@@ -1,5 +1,4 @@
 #include "duckdb/parallel/pipeline_executor.hpp"
-
 #include "duckdb/common/limits.hpp"
 #include "duckdb/main/client_context.hpp"
 
@@ -7,8 +6,6 @@
 #include <chrono>
 #include <thread>
 #endif
-
-#include <iostream>
 
 namespace duckdb {
 
@@ -544,6 +541,7 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
 	SourceResultType res;
 	bool fetch_data = true;
 	while (fetch_data) {
+
 		fetch_data = pipeline.is_lip_pipeline;
 
 		auto &source_result = pipeline.is_lip_pipeline ? *lip_chunks[0] : result;
@@ -561,11 +559,14 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
 		if (pipeline.is_lip_pipeline) {
 			lip_counter++;
 			auto &operators = pipeline.operators;
+
 			for (idx_t i = 0; i < lip_join_idxs.size(); i++) {
 				auto &next_chunk = i == lip_join_idxs.size() - 1 ? result : *lip_chunks[i + 1];
+
 				next_chunk.Reset();
 				idx_t join_idx = lip_join_idxs[i];
 				auto &join = (PhysicalHashJoin &)(operators[join_idx].get());
+
 				join.ProbeBloomFilter(*lip_chunks[i], next_chunk, *intermediate_states[join_idx]);
 				lip_statistics[join_idx].first += lip_chunks[i]->size();
 				lip_statistics[join_idx].second += lip_chunks[i]->size() - next_chunk.size();
@@ -607,22 +608,6 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
 void PipelineExecutor::InitializeChunk(DataChunk &chunk) {
 	auto &last_op = pipeline.operators.empty() ? *pipeline.source : pipeline.operators.back().get();
 	chunk.Initialize(Allocator::DefaultAllocator(), last_op.GetTypes());
-
-	if (pipeline.is_lip_pipeline) {
-		auto &first_chunk = pipeline.operators.empty() ? final_chunk : *intermediate_chunks[0];
-		for (idx_t i = 0; i < pipeline.operators.size(); i++) {
-			auto op = pipeline.operators[i];
-			if (op.get().type == PhysicalOperatorType::HASH_JOIN &&
-			    static_cast<PhysicalHashJoin &>(op.get()).build_bloom_filter) {
-
-				lip_join_idxs.push_back(i);
-				auto chunk = make_uniq<DataChunk>();
-				chunk->Initialize(Allocator::Get(context.client), first_chunk.GetTypes());
-				lip_chunks.push_back(std::move(chunk));
-				lip_statistics.emplace(i, make_pair(0, 0));
-			}
-		}
-	}
 }
 
 void PipelineExecutor::StartOperator(PhysicalOperator &op) {
