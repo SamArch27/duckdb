@@ -123,14 +123,17 @@ void PhysicalJoin::BuildJoinPipelines(Pipeline &current, MetaPipeline &meta_pipe
 					}
 					case PhysicalOperatorType::HASH_JOIN: {
 						auto &child_hj = (PhysicalHashJoin &)*leftmost_child;
-						if (child_hj.join_type != JoinType::INNER && child_hj.join_type != JoinType::SEMI) {
+						// check that the probe_idx isn't out of range
+						if (probe_idx >= child_hj.lhs_output_columns.col_idxs.size()) {
+							hash_join_op.build_bloom_filter = false;
+						} else if (child_hj.join_type != JoinType::INNER && child_hj.join_type != JoinType::SEMI) {
 							// we can only push through inner joins
 							hash_join_op.build_bloom_filter = false;
 						} else {
-							// Updating the probe_idx using the binding
+							// updating the probe_idx using the join's binding
 							probe_idx = child_hj.lhs_output_columns.col_idxs[probe_idx];
+							break;
 						}
-						break;
 					}
 					case PhysicalOperatorType::FILTER:
 						break;

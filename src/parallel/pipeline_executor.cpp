@@ -7,8 +7,6 @@
 #include <thread>
 #endif
 
-#include <iostream>
-
 namespace duckdb {
 
 PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_p)
