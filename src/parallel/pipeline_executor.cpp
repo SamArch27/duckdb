@@ -7,6 +7,8 @@
 #include <thread>
 #endif
 
+#include <iostream>
+
 namespace duckdb {
 
 PipelineExecutor::PipelineExecutor(ClientContext &context_p, Pipeline &pipeline_p)
@@ -566,7 +568,6 @@ SourceResultType PipelineExecutor::FetchFromSource(DataChunk &result) {
 				next_chunk.Reset();
 				idx_t join_idx = lip_join_idxs[i];
 				auto &join = (PhysicalHashJoin &)(operators[join_idx].get());
-
 				join.ProbeBloomFilter(*lip_chunks[i], next_chunk, *intermediate_states[join_idx]);
 				lip_statistics[join_idx].first += lip_chunks[i]->size();
 				lip_statistics[join_idx].second += lip_chunks[i]->size() - next_chunk.size();

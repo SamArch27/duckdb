@@ -5,7 +5,7 @@
 #include "duckdb/execution/operator/join/physical_hash_join.hpp"
 #include "duckdb/parallel/meta_pipeline.hpp"
 #include "duckdb/parallel/pipeline.hpp"
-
+#include <iostream>
 namespace duckdb {
 
 PhysicalJoin::PhysicalJoin(LogicalOperator &op, PhysicalOperatorType type, JoinType join_type,
@@ -64,7 +64,13 @@ void PhysicalJoin::BuildJoinPipelines(Pipeline &current, MetaPipeline &meta_pipe
 		if (join_op.type == PhysicalOperatorType::HASH_JOIN) {
 			auto &hash_join_op = (PhysicalHashJoin &)join_op;
 			bool enable_lip = DBConfig::GetConfig(current.GetClientContext()).options.lip;
-			if (enable_lip && hash_join_op.join_type != JoinType::MARK && hash_join_op.conditions.size() == 1) {
+			bool valid_join_type =
+			    (hash_join_op.join_type == JoinType::INNER || hash_join_op.join_type == JoinType::SEMI);
+			bool equi_join = hash_join_op.conditions.size() == 1 &&
+			                 hash_join_op.conditions.front().comparison == ExpressionType::COMPARE_EQUAL;
+			// must be an inner equi-join
+			if (enable_lip && valid_join_type && equi_join) {
+				// Ensure that the RHS contains at least one filter (or join)
 				if (hash_join_op.children[1]->type != PhysicalOperatorType::TABLE_SCAN) {
 					hash_join_op.build_bloom_filter = true;
 				} else {
@@ -74,13 +80,12 @@ void PhysicalJoin::BuildJoinPipelines(Pipeline &current, MetaPipeline &meta_pipe
 					}
 				}
 
-				auto *left_expr = hash_join_op.conditions[0].left.get();
+				// set the initial probe_idx using the LHS of the hash join condition
 				idx_t probe_idx = 0;
-
+				auto *left_expr = hash_join_op.conditions[0].left.get();
 				if (left_expr->type == ExpressionType::CAST) {
 					left_expr = dynamic_cast<BoundCastExpression *>(left_expr)->child.get();
 				}
-
 				if (left_expr->type == ExpressionType::BOUND_REF) {
 					auto *ref_expression = dynamic_cast<BoundReferenceExpression *>(left_expr);
 					probe_idx = ref_expression->index;
@@ -88,17 +93,24 @@ void PhysicalJoin::BuildJoinPipelines(Pipeline &current, MetaPipeline &meta_pipe
 					hash_join_op.build_bloom_filter = false;
 				}
 
-				PhysicalOperator *leftmost_child = hash_join_op.children[0].get();
-				while (hash_join_op.build_bloom_filter && !leftmost_child->children.empty()) {
-					if (leftmost_child->type == PhysicalOperatorType::PROJECTION) {
+				// iterate through the left sub-plan, checking for validity of LIP and updating the probe_idx
+				PhysicalOperator *leftmost_child = nullptr;
+				for (leftmost_child = hash_join_op.children[0].get();
+				     hash_join_op.build_bloom_filter && !leftmost_child->children.empty();
+				     leftmost_child = leftmost_child->children[0].get()) {
+
+					switch (leftmost_child->type) {
+					case PhysicalOperatorType::PROJECTION: {
 						auto *proj = (PhysicalProjection *)leftmost_child;
+						// check that the probe_idx isn't out of range
 						if (probe_idx >= proj->select_list.size()) {
 							hash_join_op.build_bloom_filter = false;
 						} else {
-							Expression *expr = &*proj->select_list[probe_idx];
+							// update the binding given casts or bound_refs
+							Expression *expr = proj->select_list[probe_idx].get();
 							if (expr->type == ExpressionType::CAST) {
-								auto *cast = dynamic_cast<BoundCastExpression *>(&*proj->select_list[probe_idx]);
-								expr = &*cast->child;
+								auto *cast = dynamic_cast<BoundCastExpression *>(proj->select_list[probe_idx].get());
+								expr = cast->child.get();
 							}
 							if (expr->type == ExpressionType::BOUND_REF) {
 								auto *ref = dynamic_cast<BoundReferenceExpression *>(expr);
@@ -107,10 +119,29 @@ void PhysicalJoin::BuildJoinPipelines(Pipeline &current, MetaPipeline &meta_pipe
 								hash_join_op.build_bloom_filter = false;
 							}
 						}
+						break;
 					}
-					leftmost_child = leftmost_child->children[0].get();
+					case PhysicalOperatorType::HASH_JOIN: {
+						auto &child_hj = (PhysicalHashJoin &)*leftmost_child;
+						if (child_hj.join_type != JoinType::INNER && child_hj.join_type != JoinType::SEMI) {
+							// we can only push through inner joins
+							hash_join_op.build_bloom_filter = false;
+						} else {
+							// Updating the probe_idx using the binding
+							probe_idx = child_hj.lhs_output_columns.col_idxs[probe_idx];
+						}
+						break;
+					}
+					case PhysicalOperatorType::FILTER:
+						break;
+					default:
+						// TODO: Handle this more robustly
+						// Unrecognized operator, so we disable LIP
+						hash_join_op.build_bloom_filter = false;
+					}
 				}
 
+				// check that the probe_idx isn't out of range
 				if (probe_idx >= leftmost_child->GetTypes().size()) {
 					hash_join_op.build_bloom_filter = false;
 				} else {
