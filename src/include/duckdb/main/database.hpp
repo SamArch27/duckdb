@@ -18,6 +18,7 @@
 #include "duckdb/main/settings.hpp"
 #include "duckdb/main/valid_checker.hpp"
 #include "duckdb/execution/aggregate_hashtable.hpp"
+#include <unordered_map>
 
 namespace duckdb {
 class BufferManager;
@@ -49,7 +50,7 @@ public:
 	DUCKDB_API ~DatabaseInstance();
 
 	DBConfig config;
-	unique_ptr<GroupedAggregateHashTable> udf_cache;
+	unordered_map<void *, unique_ptr<GroupedAggregateHashTable>> udf_caches;
 
 public:
 	BufferPool &GetBufferPool() const;

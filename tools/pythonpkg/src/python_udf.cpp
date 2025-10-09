@@ -236,10 +236,12 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 		}
 
 		// Initialize the cache if it isn't already
-		auto &cache = state.GetContext().db->udf_cache;
-		if (cache == nullptr) {
-			cache = MakeCache(input, state, result);
+		auto &map = state.GetContext().db->udf_caches;
+		auto it = map.find(static_cast<void *>(function));
+		if (it == map.end()) {
+			it = map.emplace(static_cast<void *>(function), MakeCache(input, state, result)).first;
 		}
+		auto &cache = it->second;
 
 		// Create state for HT
 		SelectionVector misses;
@@ -389,10 +391,12 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		bool udf_caching = DBConfig::GetConfig(state.GetContext()).options.udf_caching;
 
 		// Initialize the cache if it isn't already
-		auto &cache = state.GetContext().db->udf_cache;
-		if (udf_caching && cache == nullptr) {
-			cache = MakeCache(input, state, result);
+		auto &map = state.GetContext().db->udf_caches;
+		auto it = map.find(static_cast<void *>(function));
+		if (it == map.end()) {
+			it = map.emplace(static_cast<void *>(function), MakeCache(input, state, result)).first;
 		}
+		auto &cache = it->second;
 
 		// Create state for HT
 		SelectionVector misses;
