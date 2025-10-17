@@ -406,7 +406,20 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		Vector addresses(LogicalType::POINTER);
 
 		// Fetch the groups from the HT
-		idx_t miss_count = udf_caching ? cache->FindOrCreateGroups(input, addresses, misses) : STANDARD_VECTOR_SIZE;
+		idx_t miss_count = udf_caching ? cache->FindOrCreateGroups(input, addresses, misses) : input.size();
+		
+		// Set null for the output vector
+		for (idx_t row = 0; row < input.size(); ++row) {
+			for (idx_t i = 0; i < input.ColumnCount(); i++) {
+				// Fill the tuple with the arguments for this row
+				auto &column = input.data[i];
+				auto value = column.GetValue(row);
+				if (value.IsNull() && default_null_handling) {
+					FlatVector::SetNull(result, row, true);
+					break;
+				}
+			}
+		}
 
 		// Invoke the UDF for each miss
 		if (miss_count != 0) {
