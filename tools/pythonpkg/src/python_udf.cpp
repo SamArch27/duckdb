@@ -189,8 +189,196 @@ static unique_ptr<GroupedAggregateHashTable> MakeCache(DataChunk &input, Express
 	                                            input_types, output_types, aggregates);
 }
 
+// static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExceptionHandling exception_handling,
+//                                                   const ClientProperties &client_properties,
+//                                                   FunctionNullHandling null_handling) {
+// 	// Through the capture of the lambda, we have access to the function pointer
+// 	// We just need to make sure that it doesn't get garbage collected
+// 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
+// 		py::gil_scoped_acquire gil;
+
+// 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
+
+// 		// owning references
+// 		py::object python_object;
+
+// 		auto &context = state.GetContext();
+// 		auto options = context.GetClientProperties();
+
+// 		auto result_validity = FlatVector::Validity(result);
+// 		SelectionVector selvec(input.size());
+// 		idx_t input_size = input.size();
+// 		if (default_null_handling) {
+// 			vector<UnifiedVectorFormat> vec_data(input.ColumnCount());
+// 			for (idx_t i = 0; i < input.ColumnCount(); i++) {
+// 				input.data[i].ToUnifiedFormat(input.size(), vec_data[i]);
+// 			}
+
+// 			idx_t index = 0;
+// 			for (idx_t i = 0; i < input.size(); i++) {
+// 				bool any_null = false;
+// 				for (idx_t col_idx = 0; col_idx < input.ColumnCount(); col_idx++) {
+// 					auto &vec = vec_data[col_idx];
+// 					if (!vec.validity.RowIsValid(vec.sel->get_index(i))) {
+// 						any_null = true;
+// 						break;
+// 					}
+// 				}
+// 				if (any_null) {
+// 					result_validity.SetInvalid(i);
+// 					continue;
+// 				}
+// 				selvec.set_index(index++, i);
+// 			}
+// 			if (index != input.size()) {
+// 				input.Slice(selvec, index);
+// 			}
+// 		}
+
+// 		// Initialize the cache if it isn't already
+// 		auto &map = state.GetContext().db->GetUDFCache();
+// 		auto it = map.find(static_cast<void *>(function));
+// 		if (it == map.end()) {
+// 			it = map.emplace(static_cast<void *>(function), MakeCache(input, state, result)).first;
+// 		}
+// 		auto &cache = it->second;
+
+// 		// Create state for HT
+// 		SelectionVector misses;
+// 		misses.Initialize();
+// 		Vector addresses(LogicalType::POINTER);
+
+// 		// Fetch the groups from the HT
+// 		idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
+
+// 		// Create input tuple args to the vectorized UDF
+// 		auto count = input.size();
+// 		bool exception_occurred = false;
+
+// 		if (miss_count != 0) {
+// 			auto input_args = py::tuple(input.ColumnCount());
+// 			for (idx_t i = 0; i < input.ColumnCount(); ++i) {
+// 				// Create an array for this column
+// 				py::array_t<py::object> arr(miss_count);
+// 				auto buf = arr.mutable_unchecked<1>();
+// 				auto &column = input.data[i];
+
+// 				// Populate the array with the column value for each row for the input
+// 				for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
+// 					idx_t row = misses[miss_idx];
+// 					auto value = column.GetValue(row);
+// 					buf[miss_idx] = PythonObject::FromValue(value, column.GetType(), client_properties);
+// 				}
+// 				input_args[i] = arr;
+// 			}
+
+// 			// Set the timeout global variable
+// 			// py::globals()["timeout"] = 5000;
+
+// 			// Call the function
+// 			auto ret = PyObject_CallObject(function, input_args.ptr());
+// 			if (ret == nullptr && PyErr_Occurred()) {
+// 				exception_occurred = true;
+// 				if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+// 					auto exception = py::error_already_set();
+// 					throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+// 					                            exception.what());
+// 				} else {
+// 					throw NotImplementedException("Exception handling type not implemented");
+// 				}
+// 			} else {
+// 				python_object = py::reinterpret_steal<py::object>(ret);
+// 			}
+
+// 			// Cast the result to an array of Python objects
+// 			if (!py::isinstance<py::array_t<py::object>>(python_object)) {
+// 				throw InvalidInputException("Could not convert the result into a numpy array of Python objects");
+// 			}
+// 		}
+
+// 		// Convert the array back to DuckDB's vector format
+// 		auto ConvertArrayToVector = [&](Vector &result) {
+// 			if (miss_count != 0) {
+// 				auto output_array = static_cast<py::array_t<py::object>>(python_object).unchecked<1>();
+// 				for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
+// 					idx_t row = misses[miss_idx];
+// 					auto ret = output_array[miss_idx].ptr();
+// 					if (ret == nullptr && PyErr_Occurred()) {
+// 						if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+// 							auto exception = py::error_already_set();
+// 							throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+// 							                            exception.what());
+// 						} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
+// 							PyErr_Clear();
+// 							FlatVector::SetNull(result, row, true);
+// 							continue;
+// 						} else {
+// 							throw NotImplementedException("Exception handling type not implemented");
+// 						}
+// 					} else if ((!ret || ret == Py_None) && default_null_handling) {
+// 						throw InvalidInputException(NullHandlingError());
+// 					}
+// 					TransformPythonObject(ret, result, row);
+// 					if (default_null_handling && !exception_occurred) {
+// 						VerifyVectorizedNullHandling(result, count);
+// 					}
+// 				}
+// 			}
+
+// 			// Reference the result vector using our DataChunk
+// 			DataChunk payload;
+// 			auto result_type = vector<LogicalType>(1, result.GetType());
+// 			payload.Initialize(Allocator::DefaultAllocator(), result_type);
+// 			payload.SetCardinality(input);
+// 			payload.data[0].Reference(result);
+
+// 			// Load the new values into the cache (if there are any)
+// 			if (miss_count != 0) {
+// 				cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
+// 			}
+
+// 			// Fetch the aggregate result from the cache
+// 			RowOperationsState row_state(cache->GetAggregateAllocatorRef());
+// 			RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
+// 		};
+
+// 		if (count == input_size) {
+// 			ConvertArrayToVector(result);
+// 		} else {
+// 			D_ASSERT(default_null_handling);
+// 			Vector temp(result.GetType(), count);
+// 			ConvertArrayToVector(temp);
+
+// 			if (count) {
+// 				SelectionVector inverted(input_size);
+// 				// Create a SelVec that inverts the filtering
+// 				// example: count: 6, null_indices: 1,3
+// 				// input selvec: [0, 2, 4, 5]
+// 				// inverted selvec: [0, 0, 1, 1, 2, 3]
+// 				idx_t src_index = 0;
+// 				for (idx_t i = 0; i < input_size; i++) {
+// 					// Fill the gaps with the previous index
+// 					inverted.set_index(i, src_index);
+// 					if (src_index + 1 < count && selvec.get_index(src_index) == i) {
+// 						src_index++;
+// 					}
+// 				}
+// 				VectorOperations::Copy(temp, result, inverted, count, 0, 0, input_size);
+// 			}
+// 			for (idx_t i = 0; i < input_size; i++) {
+// 				FlatVector::SetNull(result, i, !result_validity.RowIsValid(i));
+// 			}
+// 			result.Verify(input_size);
+// 		}
+
+// 		if (input_size == 1) {
+// 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
+// 		}
+// 	};
+// 	return func;
+// }
+
 static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExceptionHandling exception_handling,
-                                                  const ClientProperties &client_properties,
                                                   FunctionNullHandling null_handling) {
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
@@ -201,9 +389,13 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 
 		// owning references
 		py::object python_object;
+		// Convert the input datachunk to pyarrow
+		//		ClientProperties options;
 
+		//		if (state.HasContext()) {
 		auto &context = state.GetContext();
 		auto options = context.GetClientProperties();
+		//		}
 
 		auto result_validity = FlatVector::Validity(result);
 		SelectionVector selvec(input.size());
@@ -235,120 +427,52 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 			}
 		}
 
-		// Initialize the cache if it isn't already
-		auto &map = state.GetContext().db->udf_caches;
-		auto it = map.find(static_cast<void *>(function));
-		if (it == map.end()) {
-			it = map.emplace(static_cast<void *>(function), MakeCache(input, state, result)).first;
-		}
-		auto &cache = it->second;
+		auto pyarrow_table = ConvertDataChunkToPyArrowTable(input, options, state.GetContext());
+		py::tuple column_list = pyarrow_table.attr("columns");
 
-		// Create state for HT
-		SelectionVector misses;
-		misses.Initialize();
-		Vector addresses(LogicalType::POINTER);
-
-		// Fetch the groups from the HT
-		idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
-
-		// Create input tuple args to the vectorized UDF
 		auto count = input.size();
+
+		// Call the function
+		auto ret = PyObject_CallObject(function, column_list.ptr());
 		bool exception_occurred = false;
-
-		if (miss_count != 0) {
-			auto input_args = py::tuple(input.ColumnCount());
-			for (idx_t i = 0; i < input.ColumnCount(); ++i) {
-				// Create an array for this column
-				py::array_t<py::object> arr(miss_count);
-				auto buf = arr.mutable_unchecked<1>();
-				auto &column = input.data[i];
-
-				// Populate the array with the column value for each row for the input
-				for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
-					idx_t row = misses[miss_idx];
-					auto value = column.GetValue(row);
-					buf[miss_idx] = PythonObject::FromValue(value, column.GetType(), client_properties);
-				}
-				input_args[i] = arr;
-			}
-
-			// Set the timeout global variable
-			// py::globals()["timeout"] = 5000;
-
-			// Call the function
-			auto ret = PyObject_CallObject(function, input_args.ptr());
-			if (ret == nullptr && PyErr_Occurred()) {
-				exception_occurred = true;
-				if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-					auto exception = py::error_already_set();
-					throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-					                            exception.what());
-				} else {
-					throw NotImplementedException("Exception handling type not implemented");
-				}
+		if (ret == nullptr && PyErr_Occurred()) {
+			exception_occurred = true;
+			if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+				auto exception = py::error_already_set();
+				throw InvalidInputException("Python exception occurred while executing the UDF: %s", exception.what());
+			} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
+				PyErr_Clear();
+				python_object = py::module_::import("pyarrow").attr("nulls")(count);
 			} else {
-				python_object = py::reinterpret_steal<py::object>(ret);
+				throw NotImplementedException("Exception handling type not implemented");
 			}
+		} else {
+			python_object = py::reinterpret_steal<py::object>(ret);
+		}
+		if (!py::isinstance(python_object, py::module_::import("pyarrow").attr("lib").attr("Table"))) {
+			// Try to convert into a table
+			py::list single_array(1);
+			py::list single_name(1);
 
-			// Cast the result to an array of Python objects
-			if (!py::isinstance<py::array_t<py::object>>(python_object)) {
-				throw InvalidInputException("Could not convert the result into a numpy array of Python objects");
+			single_array[0] = python_object;
+			single_name[0] = "c0";
+			try {
+				python_object = py::module_::import("pyarrow").attr("lib").attr("Table").attr("from_arrays")(
+				    single_array, py::arg("names") = single_name);
+			} catch (py::error_already_set &) {
+				throw InvalidInputException("Could not convert the result into an Arrow Table");
 			}
 		}
-
-		// Convert the array back to DuckDB's vector format
-		auto ConvertArrayToVector = [&](Vector &result) {
-			if (miss_count != 0) {
-				auto output_array = static_cast<py::array_t<py::object>>(python_object).unchecked<1>();
-				for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
-					idx_t row = misses[miss_idx];
-					auto ret = output_array[miss_idx].ptr();
-					if (ret == nullptr && PyErr_Occurred()) {
-						if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-							auto exception = py::error_already_set();
-							throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-							                            exception.what());
-						} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
-							PyErr_Clear();
-							FlatVector::SetNull(result, row, true);
-							continue;
-						} else {
-							throw NotImplementedException("Exception handling type not implemented");
-						}
-					} else if ((!ret || ret == Py_None) && default_null_handling) {
-						throw InvalidInputException(NullHandlingError());
-					}
-					TransformPythonObject(ret, result, row);
-					if (default_null_handling && !exception_occurred) {
-						VerifyVectorizedNullHandling(result, count);
-					}
-				}
-			}
-
-			// Reference the result vector using our DataChunk
-			DataChunk payload;
-			auto result_type = vector<LogicalType>(1, result.GetType());
-			payload.Initialize(Allocator::DefaultAllocator(), result_type);
-			payload.SetCardinality(input);
-			payload.data[0].Reference(result);
-
-			// Load the new values into the cache (if there are any)
-			if (miss_count != 0) {
-				cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
-			}
-
-			// Fetch the aggregate result from the cache
-			RowOperationsState row_state(cache->GetAggregateAllocatorRef());
-			RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
-		};
-
-		if (count == input_size) {
-			ConvertArrayToVector(result);
-		} else {
+		// Convert the pyarrow result back to a DuckDB datachunk
+		if (count != input_size) {
 			D_ASSERT(default_null_handling);
+			// We filtered out some NULLs, now we need to reconstruct the final result by adding the nulls back
 			Vector temp(result.GetType(), count);
-			ConvertArrayToVector(temp);
-
+			// Convert the table into a temporary Vector
+			ConvertArrowTableToVector(python_object, temp, state.GetContext(), count);
+			if (!exception_occurred) {
+				VerifyVectorizedNullHandling(temp, count);
+			}
 			if (count) {
 				SelectionVector inverted(input_size);
 				// Create a SelVec that inverts the filtering
@@ -369,6 +493,11 @@ static scalar_function_t CreateVectorizedFunction(PyObject *function, PythonExce
 				FlatVector::SetNull(result, i, !result_validity.RowIsValid(i));
 			}
 			result.Verify(input_size);
+		} else {
+			ConvertArrowTableToVector(python_object, result, state.GetContext(), count);
+			if (default_null_handling && !exception_occurred) {
+				VerifyVectorizedNullHandling(result, count);
+			}
 		}
 
 		if (input_size == 1) {
@@ -391,7 +520,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		bool udf_caching = DBConfig::GetConfig(state.GetContext()).options.udf_caching;
 
 		// Initialize the cache if it isn't already
-		auto &map = state.GetContext().db->udf_caches;
+		auto &map = state.GetContext().db->GetUDFCache();
 		auto it = map.find(static_cast<void *>(function));
 		if (it == map.end()) {
 			it = map.emplace(static_cast<void *>(function), MakeCache(input, state, result)).first;
@@ -407,7 +536,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 		// Fetch the groups from the HT
 		idx_t miss_count = udf_caching ? cache->FindOrCreateGroups(input, addresses, misses) : input.size();
-		
+
 		// Set null for the output vector
 		for (idx_t row = 0; row < input.size(); ++row) {
 			for (idx_t i = 0; i < input.ColumnCount(); i++) {
@@ -618,7 +747,7 @@ public:
 
 		scalar_function_t func;
 		if (vectorized) {
-			func = CreateVectorizedFunction(udf.ptr(), exception_handling, client_properties, null_handling);
+			func = CreateVectorizedFunction(udf.ptr(), exception_handling, null_handling);
 		} else {
 			func = CreateNativeFunction(udf.ptr(), exception_handling, client_properties, null_handling);
 		}

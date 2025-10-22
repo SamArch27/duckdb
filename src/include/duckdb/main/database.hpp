@@ -50,9 +50,10 @@ public:
 	DUCKDB_API ~DatabaseInstance();
 
 	DBConfig config;
-	unordered_map<void *, unique_ptr<GroupedAggregateHashTable>> udf_caches;
+	unordered_map<void *, unique_ptr<GroupedAggregateHashTable>> udf_cache;
 
 public:
+	unordered_map<void *, unique_ptr<GroupedAggregateHashTable>> &GetUDFCache();
 	BufferPool &GetBufferPool() const;
 	DUCKDB_API SecretManager &GetSecretManager();
 	DUCKDB_API BufferManager &GetBufferManager();

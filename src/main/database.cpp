@@ -79,7 +79,7 @@ DatabaseInstance::~DatabaseInstance() {
 
 	// stop the log manager, after this point Logger calls are unsafe.
 	log_manager.reset();
-
+	udf_cache.clear();
 	buffer_manager.reset();
 
 	// flush allocations and disable the background thread
@@ -344,6 +344,10 @@ DuckDB::~DuckDB() {
 
 SecretManager &DatabaseInstance::GetSecretManager() {
 	return *config.secret_manager;
+}
+
+unordered_map<void *, unique_ptr<GroupedAggregateHashTable>> &DatabaseInstance::GetUDFCache() {
+	return udf_cache;
 }
 
 BufferManager &DatabaseInstance::GetBufferManager() {

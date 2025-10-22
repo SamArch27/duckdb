@@ -223,7 +223,6 @@ void ClientContext::BeginQueryInternal(ClientContextLock &lock, const string &qu
 
 ErrorData ClientContext::EndQueryInternal(ClientContextLock &lock, bool success, bool invalidate_transaction,
                                           optional_ptr<ErrorData> previous_error) {
-	db->udf_caches.clear();
 	client_data->profiler->EndQuery();
 
 	if (active_query->executor) {
@@ -272,7 +271,6 @@ ErrorData ClientContext::EndQueryInternal(ClientContextLock &lock, bool success,
 			s->QueryEnd(*this, previous_error);
 		}
 	}
-
 	return error;
 }
 
