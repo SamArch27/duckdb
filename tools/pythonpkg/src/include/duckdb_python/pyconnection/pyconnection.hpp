@@ -347,7 +347,7 @@ public:
 private:
 	PathLike GetPathLike(const py::object &object);
 	ScalarFunction CreateScalarUDF(const string &name, const py::function &udf, const py::object &parameters,
-	                               const shared_ptr<DuckDBPyType> &return_type, bool vectorized,
+	                               const shared_ptr<DuckDBPyType> &return_type, PythonUDFType udf_type,
 	                               FunctionNullHandling null_handling, PythonExceptionHandling exception_handling,
 	                               bool side_effects);
 	void RegisterArrowObject(const py::object &arrow_object, const string &name);

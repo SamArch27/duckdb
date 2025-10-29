@@ -10,7 +10,7 @@ using duckdb::StringUtil;
 
 namespace duckdb {
 
-enum class PythonUDFType : uint8_t { NATIVE, ARROW };
+enum class PythonUDFType : uint8_t { NATIVE, ARROW, NUMPY };
 
 } // namespace duckdb
 
@@ -24,6 +24,8 @@ static PythonUDFType PythonUDFTypeFromString(const string &type) {
 		return PythonUDFType::NATIVE;
 	} else if (ltype == "arrow") {
 		return PythonUDFType::ARROW;
+	} else if (ltype == "numpy") {
+		return PythonUDFType::NUMPY;
 	} else {
 		throw InvalidInputException("'%s' is not a recognized type for 'udf_type'", type);
 	}
@@ -34,6 +36,8 @@ static PythonUDFType PythonUDFTypeFromInteger(int64_t value) {
 		return PythonUDFType::NATIVE;
 	} else if (value == 1) {
 		return PythonUDFType::ARROW;
+	} else if (value == 2) {
+		return PythonUDFType::NUMPY;
 	} else {
 		throw InvalidInputException("'%d' is not a recognized type for 'udf_type'", value);
 	}
