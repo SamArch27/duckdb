@@ -200,6 +200,8 @@ static scalar_function_t CreateNumpyFunction(PyObject *function, PythonException
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
+		bool udf_caching = DBConfig::GetConfig(state.GetContext()).options.udf_caching;
+
 		// owning references
 		py::object python_object;
 
@@ -246,11 +248,13 @@ static scalar_function_t CreateNumpyFunction(PyObject *function, PythonException
 
 		// Create state for HT
 		SelectionVector misses;
-		misses.Initialize();
+		if (udf_caching) {
+			misses.Initialize();
+		}
 		Vector addresses(LogicalType::POINTER);
 
 		// Fetch the groups from the HT
-		idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
+		idx_t miss_count = udf_caching ? cache->FindOrCreateGroups(input, addresses, misses) : input.size();
 
 		// Create input tuple args to the vectorized UDF
 		auto count = input.size();
@@ -266,7 +270,7 @@ static scalar_function_t CreateNumpyFunction(PyObject *function, PythonException
 
 				// Populate the array with the column value for each row for the input
 				for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
-					idx_t row = misses[miss_idx];
+					idx_t row = udf_caching ? misses[miss_idx] : miss_idx;
 					auto value = column.GetValue(row);
 					buf[miss_idx] = PythonObject::FromValue(value, column.GetType(), client_properties);
 				}
@@ -299,7 +303,7 @@ static scalar_function_t CreateNumpyFunction(PyObject *function, PythonException
 			if (miss_count != 0) {
 				auto output_array = static_cast<py::array_t<py::object>>(python_object).unchecked<1>();
 				for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
-					idx_t row = misses[miss_idx];
+					idx_t row = udf_caching ? misses[miss_idx] : miss_idx;
 					auto ret = output_array[miss_idx].ptr();
 					if (ret == nullptr && PyErr_Occurred()) {
 						if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
@@ -323,21 +327,23 @@ static scalar_function_t CreateNumpyFunction(PyObject *function, PythonException
 				}
 			}
 
-			// Reference the result vector using our DataChunk
-			DataChunk payload;
-			auto result_type = vector<LogicalType>(1, result.GetType());
-			payload.Initialize(Allocator::DefaultAllocator(), result_type);
-			payload.SetCardinality(input);
-			payload.data[0].Reference(result);
+			if (udf_caching) {
+				// Reference the result vector using our DataChunk
+				DataChunk payload;
+				auto result_type = vector<LogicalType>(1, result.GetType());
+				payload.Initialize(Allocator::DefaultAllocator(), result_type);
+				payload.SetCardinality(input);
+				payload.data[0].Reference(result);
 
-			// Load the new values into the cache (if there are any)
-			if (miss_count != 0) {
-				cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
+				// Load the new values into the cache (if there are any)
+				if (miss_count != 0) {
+					cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
+				}
+
+				// Fetch the aggregate result from the cache
+				RowOperationsState row_state(cache->GetAggregateAllocatorRef());
+				RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
 			}
-
-			// Fetch the aggregate result from the cache
-			RowOperationsState row_state(cache->GetAggregateAllocatorRef());
-			RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
 		};
 
 		if (count == input_size) {
@@ -387,14 +393,9 @@ static scalar_function_t CreateArrowFunction(PyObject *function, PythonException
 
 		// owning references
 		py::object python_object;
-		// Convert the input datachunk to pyarrow
-		//		ClientProperties options;
 
-		//		if (state.HasContext()) {
 		auto &context = state.GetContext();
 		auto options = context.GetClientProperties();
-		//		}
-
 		auto result_validity = FlatVector::Validity(result);
 		SelectionVector selvec(input.size());
 		idx_t input_size = input.size();
