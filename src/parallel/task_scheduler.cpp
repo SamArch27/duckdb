@@ -337,9 +337,6 @@ void TaskScheduler::SetThreads(idx_t total_threads, idx_t external_threads) {
 }
 
 void TaskScheduler::SetProcesses(idx_t total_processes) {
-	if (total_processes == 0) {
-		throw SyntaxException("Number of threads must be positive!");
-	}
 	requested_process_count = NumericCast<int32_t>(total_processes);
 }
 
@@ -411,7 +408,6 @@ void TaskScheduler::RelaunchThreads() {
 void TaskScheduler::RelaunchProcesses() {
 	lock_guard<mutex> t(process_lock);
 	auto n = requested_process_count.load();
-	std::cout << "Relaunch Process!" << std::endl;
 	RelaunchProcessesInternal(n);
 }
 
@@ -464,20 +460,28 @@ void TaskScheduler::RelaunchThreadsInternal(int32_t n) {
 #endif
 }
 
-void TaskScheduler::WaitForWork(idx_t process_idx) {
+void TaskScheduler::RunWorkerProcess(int read_fd, int write_fd) {
 	// wait for work
-	std::cout << "WaitForWork with idx: " << process_idx << std::endl;
-	pause();
-	std::cout << "Closing pipes from idx: " << process_idx << std::endl;
-
-	// done waiting for work, close pipes and exit
-	close(processes[process_idx].to_child[0]);
-	close(processes[process_idx].from_child[1]);
-	_exit(0);
+	WorkerCommand command;
+	while (true) {
+		ssize_t n = read(read_fd, &command, sizeof(WorkerCommand));
+		if (n <= 0) {
+			break;
+		}
+		switch (command) {
+		case WorkerCommand::CALL_UDF:
+			break;
+		case WorkerCommand::EXIT:
+			// done waiting for work, close pipes and exit
+			close(read_fd);
+			close(write_fd);
+			_exit(0);
+			break;
+		}
+	}
 }
 
 void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
-	std::cout << "Relaunch Processes Internal!" << std::endl;
 	auto &config = DBConfig::GetConfig(db);
 	auto new_process_count = NumericCast<idx_t>(n);
 	if (processes.size() == new_process_count) {
@@ -485,29 +489,20 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 		return;
 	}
 	if (processes.size() > new_process_count) {
-		std::cout << "Killing all processes!" << std::endl;
-
 		// we are reducing the number of processes: kill all processes
 		idx_t process_count = processes.size();
 		for (idx_t i = 0; i < process_count; ++i) {
-			// kill the child process
-			kill(processes[i].pid, SIGTERM);
+			// kill the child process by writing an exit message
+			ssize_t bytes_written = write(processes[i].to_child[1], &EXIT_COMMAND, sizeof(WorkerCommand));
+			close(processes[i].to_child[1]);   // close parent -> child write pipe
+			close(processes[i].from_child[0]); // close child -> parent read pipe
 			// wait for it to terminate
 			int status;
-			pid_t result = waitpid(processes[i].pid, &status, 0);
-			if (result == 0) {
-				std::cout << "Child process is still running!" << std::endl;
-			} else if (result == -1) {
-				std::cout << "Error checking child process!" << std::endl;
-			} else {
-				std::cout << "Child process at index: " << i << " has exited!" << std::endl;
-			}
+			waitpid(processes[i].pid, &status, 0);
 		}
 		processes.clear();
 	}
 	if (processes.size() < new_process_count) {
-		std::cout << "Launching new processes!" << std::endl;
-
 		// we are increasing the number of processes: launch them and run tasks on them
 		idx_t create_new_processes = new_process_count;
 		// allocate space for each new process state
@@ -518,7 +513,9 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 				// can't create more processes
 				break;
 			}
+		}
 
+		for (idx_t i = 0; i < create_new_processes; i++) {
 			// now fork a new processes
 			pid_t pid = fork();
 			if (pid < 0) {
@@ -532,7 +529,10 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 				close(processes[i].from_child[0]); // close child -> parent read pipe
 
 				// close other unrelated pipes
-				for (idx_t j = 0; j < i; j++) {
+				for (idx_t j = 0; j < create_new_processes; j++) {
+					if (i == j) {
+						continue;
+					}
 					close(processes[j].to_child[0]);
 					close(processes[j].to_child[1]);
 					close(processes[j].from_child[0]);
@@ -540,7 +540,7 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 				}
 
 				// now go and wait for work
-				WaitForWork(i);
+				RunWorkerProcess(processes[i].to_child[0], processes[i].from_child[1]);
 			}
 			// parent process
 			else {

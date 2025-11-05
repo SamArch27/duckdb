@@ -39,6 +39,8 @@ struct ProducerToken {
 //! The TaskScheduler is responsible for managing tasks and threads
 class TaskScheduler {
 
+	enum class WorkerCommand : uint8_t { CALL_UDF, EXIT };
+
 	struct ProcessState {
 		int to_child[2];
 		int from_child[2];
@@ -47,6 +49,8 @@ class TaskScheduler {
 
 	// timeout for semaphore wait, default 5ms
 	constexpr static int64_t TASK_TIMEOUT_USECS = 5000;
+	constexpr static WorkerCommand CALL_UDF_COMMAND = WorkerCommand::CALL_UDF;
+	constexpr static WorkerCommand EXIT_COMMAND = WorkerCommand::EXIT;
 
 public:
 	explicit TaskScheduler(DatabaseInstance &db);
@@ -101,7 +105,7 @@ public:
 	//! Result do not need to be exact 'return 0' is a valid fallback strategy
 	static idx_t GetEstimatedCPUId();
 
-	void WaitForWork(idx_t process_idx);
+	void RunWorkerProcess(int read_fd, int write_fd);
 
 private:
 	void RelaunchThreadsInternal(int32_t n);
