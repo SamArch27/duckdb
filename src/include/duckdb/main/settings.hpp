@@ -1185,6 +1185,16 @@ struct ThreadsSetting {
 	static Value GetSetting(const ClientContext &context);
 };
 
+struct PythonProcessesSetting {
+	using RETURN_TYPE = int64_t;
+	static constexpr const char *Name = "python_processes";
+	static constexpr const char *Description = "The number of total python processes used by the system.";
+	static constexpr const char *InputType = "BIGINT";
+	static void SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &parameter);
+	static void ResetGlobal(DatabaseInstance *db, DBConfig &config);
+	static Value GetSetting(const ClientContext &context);
+};
+
 struct UDFCachingSetting {
 	using RETURN_TYPE = bool;
 	static constexpr const char *Name = "udf_caching";

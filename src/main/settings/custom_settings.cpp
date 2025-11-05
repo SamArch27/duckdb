@@ -1370,6 +1370,34 @@ Value ThreadsSetting::GetSetting(const ClientContext &context) {
 }
 
 //===----------------------------------------------------------------------===//
+// Python Processes
+//===----------------------------------------------------------------------===//
+void PythonProcessesSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {
+	auto new_val = input.GetValue<int64_t>();
+	if (new_val < 1) {
+		throw SyntaxException("Must have at least 1 python process!");
+	}
+	auto new_maximum_python_processes = NumericCast<idx_t>(new_val);
+	if (db) {
+		TaskScheduler::GetScheduler(*db).SetThreads(new_maximum_python_processes, config.options.external_threads);
+	}
+	config.options.maximum_python_processes = new_maximum_python_processes;
+}
+
+void PythonProcessesSetting::ResetGlobal(DatabaseInstance *db, DBConfig &config) {
+	idx_t new_maximum_python_processes = config.GetSystemMaxThreads(*config.file_system);
+	if (db) {
+		TaskScheduler::GetScheduler(*db).SetThreads(new_maximum_python_processes, config.options.external_threads);
+	}
+	config.options.maximum_python_processes = new_maximum_python_processes;
+}
+
+Value PythonProcessesSetting::GetSetting(const ClientContext &context) {
+	auto &config = DBConfig::GetConfig(context);
+	return Value::BIGINT(NumericCast<int64_t>(config.options.maximum_python_processes));
+}
+
+//===----------------------------------------------------------------------===//
 // UDF Caching
 //===----------------------------------------------------------------------===//
 void UDFCachingSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {

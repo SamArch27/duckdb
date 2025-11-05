@@ -167,6 +167,7 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_LOCAL(StreamingBufferSizeSetting),
     DUCKDB_GLOBAL(TempDirectorySetting),
     DUCKDB_GLOBAL(ThreadsSetting),
+    DUCKDB_GLOBAL(PythonProcessesSetting),
     DUCKDB_GLOBAL(UDFCachingSetting),
     DUCKDB_GLOBAL(LIPSetting),
     DUCKDB_GLOBAL(BestUDFPlacementSetting),
