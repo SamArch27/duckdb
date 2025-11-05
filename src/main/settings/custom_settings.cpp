@@ -1379,7 +1379,7 @@ void PythonProcessesSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, c
 	}
 	auto new_maximum_python_processes = NumericCast<idx_t>(new_val);
 	if (db) {
-		TaskScheduler::GetScheduler(*db).SetThreads(new_maximum_python_processes, config.options.external_threads);
+		TaskScheduler::GetScheduler(*db).SetProcesses(new_maximum_python_processes);
 	}
 	config.options.maximum_python_processes = new_maximum_python_processes;
 }
@@ -1387,7 +1387,7 @@ void PythonProcessesSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, c
 void PythonProcessesSetting::ResetGlobal(DatabaseInstance *db, DBConfig &config) {
 	idx_t new_maximum_python_processes = config.GetSystemMaxThreads(*config.file_system);
 	if (db) {
-		TaskScheduler::GetScheduler(*db).SetThreads(new_maximum_python_processes, config.options.external_threads);
+		TaskScheduler::GetScheduler(*db).SetProcesses(new_maximum_python_processes);
 	}
 	config.options.maximum_python_processes = new_maximum_python_processes;
 }

@@ -13,6 +13,9 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/parallel/task.hpp"
+#include <sys/types.h>
+#include <unistd.h>
+#include <sys/wait.h>
 
 namespace duckdb {
 
@@ -35,6 +38,13 @@ struct ProducerToken {
 
 //! The TaskScheduler is responsible for managing tasks and threads
 class TaskScheduler {
+
+	struct ProcessState {
+		int to_child[2];
+		int from_child[2];
+		pid_t pid;
+	};
+
 	// timeout for semaphore wait, default 5ms
 	constexpr static int64_t TASK_TIMEOUT_USECS = 5000;
 
@@ -62,8 +72,11 @@ public:
 	//! and the number of external threads. External threads, e.g. the main thread, will also be used for execution.
 	//! Launches `total_threads - external_threads` background worker threads.
 	void SetThreads(idx_t total_threads, idx_t external_threads);
-
 	void RelaunchThreads();
+
+	//! Sets the amount of background processes for UDF execution, based on the total requested
+	void SetProcesses(idx_t total_processes);
+	void RelaunchProcesses();
 
 	//! Returns the number of threads
 	DUCKDB_API int32_t NumberOfThreads();
@@ -88,8 +101,11 @@ public:
 	//! Result do not need to be exact 'return 0' is a valid fallback strategy
 	static idx_t GetEstimatedCPUId();
 
+	void WaitForWork(idx_t process_idx);
+
 private:
 	void RelaunchThreadsInternal(int32_t n);
+	void RelaunchProcessesInternal(int32_t n);
 
 private:
 	DatabaseInstance &db;
@@ -97,8 +113,12 @@ private:
 	unique_ptr<ConcurrentQueue> queue;
 	//! Lock for modifying the thread count
 	mutex thread_lock;
+	//! Lock for modifying the process count
+	mutex process_lock;
 	//! The active background threads of the task scheduler
 	vector<unique_ptr<SchedulerThread>> threads;
+	//! The active python process state for each process of the task scheduler
+	vector<ProcessState> processes;
 	//! Markers used by the various threads, if the markers are set to "false" the thread execution is stopped
 	vector<unique_ptr<atomic<bool>>> markers;
 	//! The threshold after which to flush the allocator after completing a task
@@ -109,6 +129,10 @@ private:
 	atomic<int32_t> requested_thread_count;
 	//! The amount of threads currently running
 	atomic<int32_t> current_thread_count;
+	//! Requested processes count (set by the 'python_processes' setting)
+	atomic<int32_t> requested_process_count;
+	//! The amount of processes currently running
+	atomic<int32_t> current_process_count;
 };
 
 } // namespace duckdb

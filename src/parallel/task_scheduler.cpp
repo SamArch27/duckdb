@@ -22,6 +22,7 @@
 #include <sched.h>
 #include <unistd.h>
 #endif
+#include <iostream>
 
 namespace duckdb {
 
@@ -121,7 +122,7 @@ TaskScheduler::TaskScheduler(DatabaseInstance &db)
     : db(db), queue(make_uniq<ConcurrentQueue>()),
       allocator_flush_threshold(db.config.options.allocator_flush_threshold),
       allocator_background_threads(db.config.options.allocator_background_threads), requested_thread_count(0),
-      current_thread_count(1) {
+      current_thread_count(1), requested_process_count(0), current_process_count(0) {
 	SetAllocatorBackgroundThreads(db.config.options.allocator_background_threads);
 }
 
@@ -129,6 +130,7 @@ TaskScheduler::~TaskScheduler() {
 #ifndef DUCKDB_NO_THREADS
 	try {
 		RelaunchThreadsInternal(0);
+		RelaunchProcessesInternal(0);
 	} catch (...) {
 		// nothing we can do in the destructor if this fails
 	}
@@ -334,6 +336,13 @@ void TaskScheduler::SetThreads(idx_t total_threads, idx_t external_threads) {
 	requested_thread_count = NumericCast<int32_t>(total_threads - external_threads);
 }
 
+void TaskScheduler::SetProcesses(idx_t total_processes) {
+	if (total_processes == 0) {
+		throw SyntaxException("Number of threads must be positive!");
+	}
+	requested_process_count = NumericCast<int32_t>(total_processes);
+}
+
 void TaskScheduler::SetAllocatorFlushTreshold(idx_t threshold) {
 	allocator_flush_threshold = threshold;
 }
@@ -399,6 +408,13 @@ void TaskScheduler::RelaunchThreads() {
 	RelaunchThreadsInternal(n);
 }
 
+void TaskScheduler::RelaunchProcesses() {
+	lock_guard<mutex> t(process_lock);
+	auto n = requested_process_count.load();
+	std::cout << "Relaunch Process!" << std::endl;
+	RelaunchProcessesInternal(n);
+}
+
 void TaskScheduler::RelaunchThreadsInternal(int32_t n) {
 #ifndef DUCKDB_NO_THREADS
 	auto &config = DBConfig::GetConfig(db);
@@ -446,6 +462,98 @@ void TaskScheduler::RelaunchThreadsInternal(int32_t n) {
 		Allocator::FlushAll();
 	}
 #endif
+}
+
+void TaskScheduler::WaitForWork(idx_t process_idx) {
+	// wait for work
+	std::cout << "WaitForWork with idx: " << process_idx << std::endl;
+	pause();
+	std::cout << "Closing pipes from idx: " << process_idx << std::endl;
+
+	// done waiting for work, close pipes and exit
+	close(processes[process_idx].to_child[0]);
+	close(processes[process_idx].from_child[1]);
+	_exit(0);
+}
+
+void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
+	std::cout << "Relaunch Processes Internal!" << std::endl;
+	auto &config = DBConfig::GetConfig(db);
+	auto new_process_count = NumericCast<idx_t>(n);
+	if (processes.size() == new_process_count) {
+		current_process_count = new_process_count;
+		return;
+	}
+	if (processes.size() > new_process_count) {
+		std::cout << "Killing all processes!" << std::endl;
+
+		// we are reducing the number of processes: kill all processes
+		idx_t process_count = processes.size();
+		for (idx_t i = 0; i < process_count; ++i) {
+			// kill the child process
+			kill(processes[i].pid, SIGTERM);
+			// wait for it to terminate
+			int status;
+			pid_t result = waitpid(processes[i].pid, &status, 0);
+			if (result == 0) {
+				std::cout << "Child process is still running!" << std::endl;
+			} else if (result == -1) {
+				std::cout << "Error checking child process!" << std::endl;
+			} else {
+				std::cout << "Child process at index: " << i << " has exited!" << std::endl;
+			}
+		}
+		processes.clear();
+	}
+	if (processes.size() < new_process_count) {
+		std::cout << "Launching new processes!" << std::endl;
+
+		// we are increasing the number of processes: launch them and run tasks on them
+		idx_t create_new_processes = new_process_count;
+		// allocate space for each new process state
+		processes.resize(create_new_processes);
+		for (idx_t i = 0; i < create_new_processes; i++) {
+			// create parent to child and child to parent pipes
+			if (pipe(processes[i].to_child) == -1 || pipe(processes[i].from_child) == -1) {
+				// can't create more processes
+				break;
+			}
+
+			// now fork a new processes
+			pid_t pid = fork();
+			if (pid < 0) {
+				// error creating a new process
+				break;
+			}
+
+			// child process
+			if (pid == 0) {
+				close(processes[i].to_child[1]);   // close parent -> child write pipe
+				close(processes[i].from_child[0]); // close child -> parent read pipe
+
+				// close other unrelated pipes
+				for (idx_t j = 0; j < i; j++) {
+					close(processes[j].to_child[0]);
+					close(processes[j].to_child[1]);
+					close(processes[j].from_child[0]);
+					close(processes[j].from_child[1]);
+				}
+
+				// now go and wait for work
+				WaitForWork(i);
+			}
+			// parent process
+			else {
+				processes[i].pid = pid;
+				close(processes[i].to_child[0]);   // close parent -> child read pipe
+				close(processes[i].from_child[1]); // close child -> parent write pipe
+			}
+		}
+	}
+	current_process_count = processes.size();
+	if (Allocator::SupportsFlush()) {
+		Allocator::FlushAll();
+	}
 }
 
 } // namespace duckdb

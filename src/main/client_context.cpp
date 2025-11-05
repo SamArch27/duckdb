@@ -287,6 +287,7 @@ void ClientContext::CleanupInternal(ClientContextLock &lock, BaseQueryResult *re
 	// Relaunch the threads if a SET THREADS command was issued
 	auto &scheduler = TaskScheduler::GetScheduler(*this);
 	scheduler.RelaunchThreads();
+	scheduler.RelaunchProcesses();
 
 	optional_ptr<ErrorData> passed_error = nullptr;
 	if (result && result->HasError()) {
