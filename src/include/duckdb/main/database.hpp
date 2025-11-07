@@ -50,6 +50,8 @@ public:
 	DUCKDB_API ~DatabaseInstance();
 
 	DBConfig config;
+	vector<inner_scalar_function_t> funcs;
+	vector<LogicalType> func_return_types;
 	unordered_map<void *, unique_ptr<GroupedAggregateHashTable>> udf_cache;
 
 public:

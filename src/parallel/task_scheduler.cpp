@@ -3,6 +3,10 @@
 #include "duckdb/common/chrono.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/numeric_utils.hpp"
+#include "duckdb/common/serializer/memory_stream.hpp"
+#include "duckdb/common/serializer/binary_serializer.hpp"
+#include "duckdb/common/serializer/binary_deserializer.hpp"
+
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 
@@ -23,6 +27,7 @@
 #include <unistd.h>
 #endif
 #include <iostream>
+#include <algorithm>
 
 namespace duckdb {
 
@@ -460,6 +465,180 @@ void TaskScheduler::RelaunchThreadsInternal(int32_t n) {
 #endif
 }
 
+void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, Vector &result) {
+	std::cout << "ExecuteUDFOnWorkers called!" << std::endl;
+	std::cout << "Printing input chunk: " << std::endl;
+	std::cout << chunk.ToString() << std::endl;
+
+	LogicalType return_type = db.func_return_types[function_index];
+	for (auto &proc : processes) {
+		std::cout << "Sending UDF command to worker processes!" << std::endl;
+		// Send the UDF command to all processes
+		write(proc.to_child[1], &CALL_UDF_COMMAND, sizeof(WorkerCommand));
+	}
+
+	idx_t num_procs = processes.size();
+
+	// duplicate the chunk for each process
+	Allocator allocator;
+	vector<DataChunk> split_chunks(num_procs);
+	for (idx_t i = 0; i < num_procs; ++i) {
+		split_chunks[i].Initialize(allocator, chunk.GetTypes());
+		chunk.Copy(split_chunks[i]);
+		std::cout << "Printing split_chunks[" << i << "]" << std::endl;
+		std::cout << split_chunks[i].ToString() << std::endl;
+	}
+
+	// now slice each chunk to have access to the correct range of rows
+	for (idx_t i = 0; i < num_procs; ++i) {
+		idx_t start_row = i * chunk.size() / num_procs;
+		idx_t end_row = (i + 1) * chunk.size() / num_procs;
+		idx_t num_rows = end_row - start_row;
+		split_chunks[i].Slice(start_row, num_rows);
+
+		std::cout << "Printing split_chunk[" << i << "]" << std::endl;
+		std::cout << split_chunks[i].ToString() << std::endl;
+	}
+
+	// now for each process, serialize its chunk
+	for (idx_t i = 0; i < num_procs; ++i) {
+		std::cout << "Serializing input chunk for process: " << i << std::endl;
+		// serialize the input data chunk
+		MemoryStream mem_stream(allocator);
+		BinarySerializer serializer(mem_stream);
+		serializer.Begin();
+		split_chunks[i].Serialize(serializer);
+		serializer.End();
+
+		// get the length and buffer
+		idx_t length = mem_stream.GetPosition();
+		mem_stream.Rewind();
+		auto *data = mem_stream.GetData();
+
+		// send the function index
+		std::cout << "Writing function index: " << function_index << " for process: " << i << std::endl;
+		write(processes[i].to_child[1], &function_index, sizeof(idx_t));
+
+		// send the length of the payload
+		std::cout << "Writing length: " << length << " of input serialized datachunk process: " << i << std::endl;
+		write(processes[i].to_child[1], &length, sizeof(idx_t));
+
+		// then send the payload
+		std::cout << "Writing payload of input serialized datachunk process: " << i << std::endl;
+		write(processes[i].to_child[1], data, length);
+	}
+
+	// now for each process, get the result vector back and write it out the final result vector
+	for (idx_t i = 0; i < num_procs; ++i) {
+
+		// compute range for process
+		idx_t start_row = i * chunk.size() / num_procs;
+		idx_t end_row = (i + 1) * chunk.size() / num_procs;
+		idx_t num_rows = end_row - start_row;
+
+		// read the payload length
+		idx_t payload_length = DConstants::INVALID_INDEX;
+		read(processes[i].from_child[0], &payload_length, sizeof(idx_t));
+		std::cout << "Read length: " << payload_length << " of serialized result vector for process: " << i
+		          << std::endl;
+
+		// allocate a buffer for the payload
+		vector<data_t> payload(payload_length);
+
+		// read the result vector
+		read(processes[i].from_child[0], payload.data(), payload_length);
+		std::cout << "Reading serialized result vector for process: " << i << std::endl;
+
+		// deserialize the payload
+		Allocator allocator;
+		MemoryStream mem_stream(allocator);
+		BinaryDeserializer deserializer(mem_stream);
+		Vector partial_result(return_type);
+		deserializer.Begin();
+		partial_result.Deserialize(deserializer, num_rows);
+		deserializer.End();
+		mem_stream.Rewind();
+
+		std::cout << "Printing deserialized datachunk from process: " << i << std::endl;
+		std::cout << partial_result.ToString() << std::endl;
+
+		// now copy the partial result from this process into the final result
+		std::cout << "Copying partial result to final result from process: " << i << std::endl;
+		VectorOperations::Copy(partial_result, result, num_rows, 0, start_row);
+		std::cout << "Output final result" << std::endl;
+		std::cout << result.ToString() << std::endl;
+	}
+}
+
+void TaskScheduler::WorkerCallUDF(int read_fd, int write_fd) {
+
+	idx_t function_index = DConstants::INVALID_INDEX;
+	idx_t payload_length = DConstants::INVALID_INDEX;
+
+	std::cout << "WorkerCallUDF called!" << std::endl;
+
+	// read the function index
+	read(read_fd, &function_index, sizeof(idx_t));
+	std::cout << "Read function_index: " << function_index << std::endl;
+
+	// read the payload length
+	read(read_fd, &payload_length, sizeof(idx_t));
+	std::cout << "Read payload_length: " << payload_length << std::endl;
+
+	// allocate a buffer for the payload
+	vector<data_t> payload(payload_length);
+
+	// read in the payload
+	read(read_fd, payload.data(), payload_length);
+	std::cout << "Read payload!" << std::endl;
+
+	// deserialize the payload
+	Allocator allocator;
+	MemoryStream mem_stream(allocator);
+	BinaryDeserializer deserializer(mem_stream);
+	DataChunk input;
+	deserializer.Begin();
+	input.Deserialize(deserializer);
+	deserializer.End();
+	mem_stream.Rewind();
+
+	std::cout << "Printing deserialized datachunk!" << std::endl;
+	std::cout << input.ToString() << std::endl;
+
+	// call the UDF
+	inner_scalar_function_t &func = db.funcs[function_index];
+	LogicalType func_return_type = db.func_return_types[function_index];
+	Vector result(func_return_type);
+	std::cout << "Calling UDF!" << std::endl;
+	func(input, result);
+	std::cout << "Printing result!" << std::endl;
+	std::cout << result.ToString() << std::endl;
+
+	// serialize the resulting output vector
+	BinarySerializer serializer(mem_stream);
+	serializer.Begin();
+	result.Serialize(serializer, input.size());
+	serializer.End();
+	idx_t output_length = mem_stream.GetPosition();
+	mem_stream.Rewind();
+	auto *output_data = mem_stream.GetData();
+
+	// send the result vector back
+	// first write out the payload length
+	std::cout << "Writing serialized result length: " << output_length << std::endl;
+	write(write_fd, &output_length, sizeof(idx_t));
+
+	// then write out the payload
+	std::cout << "Writing serialized result!" << std::endl;
+	write(write_fd, output_data, output_length);
+}
+
+void TaskScheduler::WorkerExit(int read_fd, int write_fd) {
+	close(read_fd);
+	close(write_fd);
+	_exit(0);
+}
+
 void TaskScheduler::RunWorkerProcess(int read_fd, int write_fd) {
 	// wait for work
 	WorkerCommand command;
@@ -470,19 +649,16 @@ void TaskScheduler::RunWorkerProcess(int read_fd, int write_fd) {
 		}
 		switch (command) {
 		case WorkerCommand::CALL_UDF:
+			WorkerCallUDF(read_fd, write_fd);
 			break;
 		case WorkerCommand::EXIT:
-			// done waiting for work, close pipes and exit
-			close(read_fd);
-			close(write_fd);
-			_exit(0);
+			WorkerExit(read_fd, write_fd);
 			break;
 		}
 	}
 }
 
 void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
-	auto &config = DBConfig::GetConfig(db);
 	auto new_process_count = NumericCast<idx_t>(n);
 	if (processes.size() == new_process_count) {
 		current_process_count = new_process_count;
@@ -493,7 +669,7 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 		idx_t process_count = processes.size();
 		for (idx_t i = 0; i < process_count; ++i) {
 			// kill the child process by writing an exit message
-			ssize_t bytes_written = write(processes[i].to_child[1], &EXIT_COMMAND, sizeof(WorkerCommand));
+			write(processes[i].to_child[1], &EXIT_COMMAND, sizeof(WorkerCommand));
 			close(processes[i].to_child[1]);   // close parent -> child write pipe
 			close(processes[i].from_child[0]); // close child -> parent read pipe
 			// wait for it to terminate

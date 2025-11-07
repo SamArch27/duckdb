@@ -13,6 +13,7 @@
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/parallel/task.hpp"
+#include "duckdb/function/scalar_function.hpp"
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/wait.h>
@@ -105,6 +106,9 @@ public:
 	//! Result do not need to be exact 'return 0' is a valid fallback strategy
 	static idx_t GetEstimatedCPUId();
 
+	void ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, Vector &result);
+	void WorkerCallUDF(int read_fd, int write_fd);
+	void WorkerExit(int read_fd, int write_fd);
 	void RunWorkerProcess(int read_fd, int write_fd);
 
 private:

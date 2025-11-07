@@ -95,6 +95,7 @@ struct ScalarFunctionBindInput {
 };
 
 //! The scalar function type
+typedef std::function<void(DataChunk &, Vector &)> inner_scalar_function_t;
 typedef std::function<void(DataChunk &, ExpressionState &, Vector &)> scalar_function_t;
 //! The type to bind the scalar function and to create the function data
 typedef unique_ptr<FunctionData> (*bind_scalar_function_t)(ClientContext &context, ScalarFunction &bound_function,

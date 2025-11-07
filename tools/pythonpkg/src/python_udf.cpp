@@ -26,6 +26,7 @@
 #include "duckdb/function/aggregate/distributive_function_utils.hpp"
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb_python/python_conversion.hpp"
+#include "duckdb/main/database.hpp"
 #include <chrono>
 namespace duckdb {
 
@@ -508,114 +509,187 @@ static scalar_function_t CreateArrowFunction(PyObject *function, PythonException
 
 static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptionHandling exception_handling,
                                               const ClientProperties &client_properties,
-                                              FunctionNullHandling null_handling) {
-
+                                              FunctionNullHandling null_handling, LogicalType return_type,
+                                              DatabaseInstance &db) {
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
-	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
+	inner_scalar_function_t inner_func = [=, &db](DataChunk &input, Vector &result) -> void { // NOLINT
 		py::gil_scoped_acquire gil;
+
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
 
-		bool udf_caching = DBConfig::GetConfig(state.GetContext()).options.udf_caching;
+		for (idx_t row = 0; row < input.size(); row++) {
 
-		// Initialize the cache if it isn't already
-		auto &map = state.GetContext().db->GetUDFCache();
-		auto it = map.find(static_cast<void *>(function));
-		if (it == map.end()) {
-			it = map.emplace(static_cast<void *>(function), MakeCache(input, state, result)).first;
-		}
-		auto &cache = it->second;
-
-		// Create state for HT
-		SelectionVector misses;
-		if (udf_caching) {
-			misses.Initialize();
-		}
-		Vector addresses(LogicalType::POINTER);
-
-		// Fetch the groups from the HT
-		idx_t miss_count = udf_caching ? cache->FindOrCreateGroups(input, addresses, misses) : input.size();
-
-		// Set null for the output vector
-		for (idx_t row = 0; row < input.size(); ++row) {
+			auto bundled_parameters = py::tuple((int)input.ColumnCount());
+			bool contains_null = false;
 			for (idx_t i = 0; i < input.ColumnCount(); i++) {
 				// Fill the tuple with the arguments for this row
 				auto &column = input.data[i];
 				auto value = column.GetValue(row);
 				if (value.IsNull() && default_null_handling) {
-					FlatVector::SetNull(result, row, true);
+					contains_null = true;
 					break;
 				}
+				bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
 			}
-		}
+			if (contains_null) {
+				// Immediately insert None, no need to call the function
+				FlatVector::SetNull(result, row, true);
+				continue;
+			}
 
-		// Invoke the UDF for each miss
-		if (miss_count != 0) {
-			for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
-				idx_t row = udf_caching ? misses[miss_idx] : miss_idx;
-				auto bundled_parameters = py::tuple((int)input.ColumnCount());
-				bool contains_null = false;
-				for (idx_t i = 0; i < input.ColumnCount(); i++) {
-					// Fill the tuple with the arguments for this row
-					auto &column = input.data[i];
-					auto value = column.GetValue(row);
-					if (value.IsNull() && default_null_handling) {
-						contains_null = true;
-						break;
-					}
-					bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
-				}
-				if (contains_null) {
-					// Immediately insert None, no need to call the function
+			// Call the function
+			auto ret = PyObject_CallObject(function, bundled_parameters.ptr());
+			if (ret == nullptr && PyErr_Occurred()) {
+				if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+					auto exception = py::error_already_set();
+					throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+					                            exception.what());
+				} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
+					PyErr_Clear();
 					FlatVector::SetNull(result, row, true);
 					continue;
+				} else {
+					throw NotImplementedException("Exception handling type not implemented");
 				}
-
-				// Call the function
-				auto ret = PyObject_CallObject(function, bundled_parameters.ptr());
-				if (ret == nullptr && PyErr_Occurred()) {
-					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-						auto exception = py::error_already_set();
-						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-						                            exception.what());
-					} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
-						PyErr_Clear();
-						FlatVector::SetNull(result, row, true);
-						continue;
-					} else {
-						throw NotImplementedException("Exception handling type not implemented");
-					}
-				} else if ((!ret || ret == Py_None) && default_null_handling) {
-					throw InvalidInputException(NullHandlingError());
-				}
-				TransformPythonObject(ret, result, row);
+			} else if ((!ret || ret == Py_None) && default_null_handling) {
+				throw InvalidInputException(NullHandlingError());
 			}
-		}
-
-		if (udf_caching) {
-			// Reference the result vector using our DataChunk
-			DataChunk payload;
-			auto result_type = vector<LogicalType>(1, result.GetType());
-			payload.Initialize(Allocator::DefaultAllocator(), result_type);
-			payload.SetCardinality(input);
-			payload.data[0].Reference(result);
-
-			// Load the new values into the cache (if there are any)
-			if (miss_count != 0) {
-				cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
-			}
-
-			// Fetch the aggregate result from the cache
-			RowOperationsState row_state(cache->GetAggregateAllocatorRef());
-			RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
+			TransformPythonObject(ret, result, row);
 		}
 
 		if (input.size() == 1) {
 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
 		}
 	};
+
+	auto &funcs = db.funcs;
+	auto &func_return_types = db.func_return_types;
+	idx_t function_index = funcs.size();
+
+	scalar_function_t func = [=, &db](DataChunk &input, ExpressionState &state, Vector &result) -> void {
+		std::cout << "Executing UDF from func by calling ExecuteUDFOnWorkers!" << std::endl;
+		TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db))
+		    .ExecuteUDFOnWorkers(input, function_index, result);
+	};
+
+	// TODO: Push back the lambda WITHOUT any state parameter
+	std::cout << "Adding UDF to function registry!" << std::endl;
+	funcs.push_back(inner_func);
+	func_return_types.push_back(return_type);
 	return func;
 }
+
+// static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptionHandling exception_handling,
+//                                               const ClientProperties &client_properties,
+//                                               FunctionNullHandling null_handling) {
+
+// 	// Through the capture of the lambda, we have access to the function pointer
+// 	// We just need to make sure that it doesn't get garbage collected
+// 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
+// 		py::gil_scoped_acquire gil;
+// 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
+
+// 		bool udf_caching = DBConfig::GetConfig(state.GetContext()).options.udf_caching;
+
+// 		// Initialize the cache if it isn't already
+// 		auto &map = state.GetContext().db->GetUDFCache();
+// 		auto it = map.find(static_cast<void *>(function));
+// 		if (it == map.end()) {
+// 			it = map.emplace(static_cast<void *>(function), MakeCache(input, state, result)).first;
+// 		}
+// 		auto &cache = it->second;
+
+// 		// Create state for HT
+// 		SelectionVector misses;
+// 		if (udf_caching) {
+// 			misses.Initialize();
+// 		}
+// 		Vector addresses(LogicalType::POINTER);
+
+// 		// Fetch the groups from the HT
+// 		idx_t miss_count = udf_caching ? cache->FindOrCreateGroups(input, addresses, misses) : input.size();
+
+// 		// Set null for the output vector
+// 		for (idx_t row = 0; row < input.size(); ++row) {
+// 			for (idx_t i = 0; i < input.ColumnCount(); i++) {
+// 				// Fill the tuple with the arguments for this row
+// 				auto &column = input.data[i];
+// 				auto value = column.GetValue(row);
+// 				if (value.IsNull() && default_null_handling) {
+// 					FlatVector::SetNull(result, row, true);
+// 					break;
+// 				}
+// 			}
+// 		}
+
+// 		// Invoke the UDF for each miss
+// 		if (miss_count != 0) {
+// 			for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
+// 				idx_t row = udf_caching ? misses[miss_idx] : miss_idx;
+// 				auto bundled_parameters = py::tuple((int)input.ColumnCount());
+// 				bool contains_null = false;
+// 				for (idx_t i = 0; i < input.ColumnCount(); i++) {
+// 					// Fill the tuple with the arguments for this row
+// 					auto &column = input.data[i];
+// 					auto value = column.GetValue(row);
+// 					if (value.IsNull() && default_null_handling) {
+// 						contains_null = true;
+// 						break;
+// 					}
+// 					bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
+// 				}
+// 				if (contains_null) {
+// 					// Immediately insert None, no need to call the function
+// 					FlatVector::SetNull(result, row, true);
+// 					continue;
+// 				}
+
+// 				// Call the function
+// 				auto ret = PyObject_CallObject(function, bundled_parameters.ptr());
+// 				if (ret == nullptr && PyErr_Occurred()) {
+// 					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
+// 						auto exception = py::error_already_set();
+// 						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
+// 						                            exception.what());
+// 					} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
+// 						PyErr_Clear();
+// 						FlatVector::SetNull(result, row, true);
+// 						continue;
+// 					} else {
+// 						throw NotImplementedException("Exception handling type not implemented");
+// 					}
+// 				} else if ((!ret || ret == Py_None) && default_null_handling) {
+// 					throw InvalidInputException(NullHandlingError());
+// 				}
+// 				TransformPythonObject(ret, result, row);
+// 			}
+// 		}
+
+// 		if (udf_caching) {
+// 			// Reference the result vector using our DataChunk
+// 			DataChunk payload;
+// 			auto result_type = vector<LogicalType>(1, result.GetType());
+// 			payload.Initialize(Allocator::DefaultAllocator(), result_type);
+// 			payload.SetCardinality(input);
+// 			payload.data[0].Reference(result);
+
+// 			// Load the new values into the cache (if there are any)
+// 			if (miss_count != 0) {
+// 				cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
+// 			}
+
+// 			// Fetch the aggregate result from the cache
+// 			RowOperationsState row_state(cache->GetAggregateAllocatorRef());
+// 			RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
+// 		}
+
+// 		if (input.size() == 1) {
+// 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
+// 		}
+// 	};
+// 	return func;
+// }
 
 namespace {
 
@@ -738,7 +812,8 @@ public:
 	}
 
 	ScalarFunction GetFunction(const py::function &udf, PythonExceptionHandling exception_handling, bool side_effects,
-	                           const ClientProperties &client_properties) {
+	                           const ClientProperties &client_properties, LogicalType return_type,
+	                           DatabaseInstance &db) {
 
 		auto &import_cache = *DuckDBPyConnection::ImportCache();
 		// Import this module, because importing this from a non-main thread causes a segfault
@@ -747,7 +822,8 @@ public:
 		scalar_function_t func;
 		switch (udf_type) {
 		case PythonUDFType::NATIVE:
-			func = CreateNativeFunction(udf.ptr(), exception_handling, client_properties, null_handling);
+			func =
+			    CreateNativeFunction(udf.ptr(), exception_handling, client_properties, null_handling, return_type, db);
 			break;
 		case PythonUDFType::ARROW:
 			func = CreateArrowFunction(udf.ptr(), exception_handling, null_handling);
@@ -774,12 +850,12 @@ ScalarFunction DuckDBPyConnection::CreateScalarUDF(const string &name, const py:
                                                    PythonExceptionHandling exception_handling, bool side_effects) {
 	PythonUDFData data(name, udf_type, null_handling);
 	auto &connection = con.GetConnection();
-
 	data.AnalyzeSignature(udf);
 	data.OverrideParameters(parameters);
 	data.OverrideReturnType(return_type);
 	data.Verify();
-	return data.GetFunction(udf, exception_handling, side_effects, connection.context->GetClientProperties());
+	return data.GetFunction(udf, exception_handling, side_effects, connection.context->GetClientProperties(),
+	                        data.return_type, DatabaseInstance::GetDatabase(*connection.context));
 }
 
 } // namespace duckdb
