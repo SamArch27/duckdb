@@ -1374,8 +1374,8 @@ Value ThreadsSetting::GetSetting(const ClientContext &context) {
 //===----------------------------------------------------------------------===//
 void PythonProcessesSetting::SetGlobal(DatabaseInstance *db, DBConfig &config, const Value &input) {
 	auto new_val = input.GetValue<int64_t>();
-	if (new_val < 1) {
-		throw SyntaxException("Must have at least 1 python process!");
+	if (new_val < 0) {
+		throw SyntaxException("Cannot have a negative number of python processes!");
 	}
 	auto new_maximum_python_processes = NumericCast<idx_t>(new_val);
 	if (db) {

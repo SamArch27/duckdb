@@ -112,6 +112,9 @@ public:
 	void RunWorkerProcess(int read_fd, int write_fd);
 
 private:
+	void BlockingRead(int read_fd, void *buf, size_t len);
+	void BlockingWrite(int write_fd, const void *buf, size_t len);
+
 	void RelaunchThreadsInternal(int32_t n);
 	void RelaunchProcessesInternal(int32_t n);
 

@@ -26,7 +26,6 @@
 #include <sched.h>
 #include <unistd.h>
 #endif
-#include <iostream>
 #include <algorithm>
 
 namespace duckdb {
@@ -465,16 +464,60 @@ void TaskScheduler::RelaunchThreadsInternal(int32_t n) {
 #endif
 }
 
+void TaskScheduler::BlockingRead(int read_fd, void *buf, size_t len) {
+
+	// read the desired in out, until reading the desired length
+	size_t bytes_read = 0;
+	data_t *ptr = static_cast<data_t *>(buf);
+
+	while (bytes_read < len) {
+		ssize_t ret = read(read_fd, ptr + bytes_read, len - bytes_read);
+
+		if (ret < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			throw InternalException("Error! Blocking read failed!");
+		}
+
+		if (ret == 0) {
+			break;
+		}
+
+		bytes_read += ret;
+	}
+}
+
+void TaskScheduler::BlockingWrite(int write_fd, const void *buf, size_t len) {
+
+	// write the desired bytes out, until writing the desired length
+	size_t bytes_written = 0;
+	const data_t *ptr = static_cast<const data_t *>(buf);
+
+	while (bytes_written < len) {
+		ssize_t ret = write(write_fd, ptr + bytes_written, len - bytes_written);
+
+		if (ret < 0) {
+			if (errno == EINTR) {
+				continue;
+			}
+			throw InternalException("Error! Blocking read failed!");
+		}
+
+		if (ret == 0) {
+			throw InternalException("Error! Didn't read the full payload!");
+		}
+
+		bytes_written += ret;
+	}
+}
+
 void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, Vector &result) {
-	std::cout << "ExecuteUDFOnWorkers called!" << std::endl;
-	std::cout << "Printing input chunk: " << std::endl;
-	std::cout << chunk.ToString() << std::endl;
 
 	LogicalType return_type = db.func_return_types[function_index];
 	for (auto &proc : processes) {
-		std::cout << "Sending UDF command to worker processes!" << std::endl;
 		// Send the UDF command to all processes
-		write(proc.to_child[1], &CALL_UDF_COMMAND, sizeof(WorkerCommand));
+		BlockingWrite(proc.to_child[1], &CALL_UDF_COMMAND, sizeof(WorkerCommand));
 	}
 
 	idx_t num_procs = processes.size();
@@ -484,9 +527,7 @@ void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, 
 	vector<DataChunk> split_chunks(num_procs);
 	for (idx_t i = 0; i < num_procs; ++i) {
 		split_chunks[i].Initialize(allocator, chunk.GetTypes());
-		chunk.Copy(split_chunks[i]);
-		std::cout << "Printing split_chunks[" << i << "]" << std::endl;
-		std::cout << split_chunks[i].ToString() << std::endl;
+		split_chunks[i].Reference(chunk);
 	}
 
 	// now slice each chunk to have access to the correct range of rows
@@ -495,14 +536,10 @@ void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, 
 		idx_t end_row = (i + 1) * chunk.size() / num_procs;
 		idx_t num_rows = end_row - start_row;
 		split_chunks[i].Slice(start_row, num_rows);
-
-		std::cout << "Printing split_chunk[" << i << "]" << std::endl;
-		std::cout << split_chunks[i].ToString() << std::endl;
 	}
 
 	// now for each process, serialize its chunk
 	for (idx_t i = 0; i < num_procs; ++i) {
-		std::cout << "Serializing input chunk for process: " << i << std::endl;
 		// serialize the input data chunk
 		MemoryStream mem_stream(allocator);
 		BinarySerializer serializer(mem_stream);
@@ -512,20 +549,16 @@ void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, 
 
 		// get the length and buffer
 		idx_t length = mem_stream.GetPosition();
-		mem_stream.Rewind();
 		auto *data = mem_stream.GetData();
 
 		// send the function index
-		std::cout << "Writing function index: " << function_index << " for process: " << i << std::endl;
-		write(processes[i].to_child[1], &function_index, sizeof(idx_t));
+		BlockingWrite(processes[i].to_child[1], &function_index, sizeof(idx_t));
 
 		// send the length of the payload
-		std::cout << "Writing length: " << length << " of input serialized datachunk process: " << i << std::endl;
-		write(processes[i].to_child[1], &length, sizeof(idx_t));
+		BlockingWrite(processes[i].to_child[1], &length, sizeof(idx_t));
 
 		// then send the payload
-		std::cout << "Writing payload of input serialized datachunk process: " << i << std::endl;
-		write(processes[i].to_child[1], data, length);
+		BlockingWrite(processes[i].to_child[1], data, length);
 	}
 
 	// now for each process, get the result vector back and write it out the final result vector
@@ -538,20 +571,19 @@ void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, 
 
 		// read the payload length
 		idx_t payload_length = DConstants::INVALID_INDEX;
-		read(processes[i].from_child[0], &payload_length, sizeof(idx_t));
-		std::cout << "Read length: " << payload_length << " of serialized result vector for process: " << i
-		          << std::endl;
+		BlockingRead(processes[i].from_child[0], &payload_length, sizeof(idx_t));
 
 		// allocate a buffer for the payload
 		vector<data_t> payload(payload_length);
 
 		// read the result vector
-		read(processes[i].from_child[0], payload.data(), payload_length);
-		std::cout << "Reading serialized result vector for process: " << i << std::endl;
+		BlockingRead(processes[i].from_child[0], payload.data(), payload_length);
 
 		// deserialize the payload
 		Allocator allocator;
 		MemoryStream mem_stream(allocator);
+		mem_stream.WriteData(payload.data(), payload_length);
+		mem_stream.Rewind();
 		BinaryDeserializer deserializer(mem_stream);
 		Vector partial_result(return_type);
 		deserializer.Begin();
@@ -559,14 +591,8 @@ void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, 
 		deserializer.End();
 		mem_stream.Rewind();
 
-		std::cout << "Printing deserialized datachunk from process: " << i << std::endl;
-		std::cout << partial_result.ToString() << std::endl;
-
 		// now copy the partial result from this process into the final result
-		std::cout << "Copying partial result to final result from process: " << i << std::endl;
 		VectorOperations::Copy(partial_result, result, num_rows, 0, start_row);
-		std::cout << "Output final result" << std::endl;
-		std::cout << result.ToString() << std::endl;
 	}
 }
 
@@ -575,26 +601,23 @@ void TaskScheduler::WorkerCallUDF(int read_fd, int write_fd) {
 	idx_t function_index = DConstants::INVALID_INDEX;
 	idx_t payload_length = DConstants::INVALID_INDEX;
 
-	std::cout << "WorkerCallUDF called!" << std::endl;
-
 	// read the function index
-	read(read_fd, &function_index, sizeof(idx_t));
-	std::cout << "Read function_index: " << function_index << std::endl;
+	BlockingRead(read_fd, &function_index, sizeof(idx_t));
 
 	// read the payload length
-	read(read_fd, &payload_length, sizeof(idx_t));
-	std::cout << "Read payload_length: " << payload_length << std::endl;
+	BlockingRead(read_fd, &payload_length, sizeof(idx_t));
 
 	// allocate a buffer for the payload
 	vector<data_t> payload(payload_length);
 
 	// read in the payload
-	read(read_fd, payload.data(), payload_length);
-	std::cout << "Read payload!" << std::endl;
+	BlockingRead(read_fd, payload.data(), payload_length);
 
 	// deserialize the payload
 	Allocator allocator;
 	MemoryStream mem_stream(allocator);
+	mem_stream.WriteData(payload.data(), payload_length);
+	mem_stream.Rewind();
 	BinaryDeserializer deserializer(mem_stream);
 	DataChunk input;
 	deserializer.Begin();
@@ -602,17 +625,11 @@ void TaskScheduler::WorkerCallUDF(int read_fd, int write_fd) {
 	deserializer.End();
 	mem_stream.Rewind();
 
-	std::cout << "Printing deserialized datachunk!" << std::endl;
-	std::cout << input.ToString() << std::endl;
-
 	// call the UDF
 	inner_scalar_function_t &func = db.funcs[function_index];
 	LogicalType func_return_type = db.func_return_types[function_index];
 	Vector result(func_return_type);
-	std::cout << "Calling UDF!" << std::endl;
 	func(input, result);
-	std::cout << "Printing result!" << std::endl;
-	std::cout << result.ToString() << std::endl;
 
 	// serialize the resulting output vector
 	BinarySerializer serializer(mem_stream);
@@ -625,12 +642,10 @@ void TaskScheduler::WorkerCallUDF(int read_fd, int write_fd) {
 
 	// send the result vector back
 	// first write out the payload length
-	std::cout << "Writing serialized result length: " << output_length << std::endl;
-	write(write_fd, &output_length, sizeof(idx_t));
+	BlockingWrite(write_fd, &output_length, sizeof(idx_t));
 
 	// then write out the payload
-	std::cout << "Writing serialized result!" << std::endl;
-	write(write_fd, output_data, output_length);
+	BlockingWrite(write_fd, output_data, output_length);
 }
 
 void TaskScheduler::WorkerExit(int read_fd, int write_fd) {
@@ -643,6 +658,7 @@ void TaskScheduler::RunWorkerProcess(int read_fd, int write_fd) {
 	// wait for work
 	WorkerCommand command;
 	while (true) {
+		// safe read
 		ssize_t n = read(read_fd, &command, sizeof(WorkerCommand));
 		if (n <= 0) {
 			break;
@@ -669,7 +685,7 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 		idx_t process_count = processes.size();
 		for (idx_t i = 0; i < process_count; ++i) {
 			// kill the child process by writing an exit message
-			write(processes[i].to_child[1], &EXIT_COMMAND, sizeof(WorkerCommand));
+			BlockingWrite(processes[i].to_child[1], &EXIT_COMMAND, sizeof(WorkerCommand));
 			close(processes[i].to_child[1]);   // close parent -> child write pipe
 			close(processes[i].from_child[0]); // close child -> parent read pipe
 			// wait for it to terminate

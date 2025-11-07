@@ -568,13 +568,18 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	idx_t function_index = funcs.size();
 
 	scalar_function_t func = [=, &db](DataChunk &input, ExpressionState &state, Vector &result) -> void {
-		std::cout << "Executing UDF from func by calling ExecuteUDFOnWorkers!" << std::endl;
-		TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db))
-		    .ExecuteUDFOnWorkers(input, function_index, result);
+		// execute the UDF directly if there are no python processes
+		if (DBConfig::GetConfig(state.GetContext()).options.maximum_python_processes == 0) {
+			inner_func(input, result);
+		}
+		// otherwise parallelize over the worker processes
+		else {
+			TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db))
+			    .ExecuteUDFOnWorkers(input, function_index, result);
+		}
 	};
 
 	// TODO: Push back the lambda WITHOUT any state parameter
-	std::cout << "Adding UDF to function registry!" << std::endl;
 	funcs.push_back(inner_func);
 	func_return_types.push_back(return_type);
 	return func;
