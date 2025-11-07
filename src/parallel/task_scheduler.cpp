@@ -3,9 +3,6 @@
 #include "duckdb/common/chrono.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/numeric_utils.hpp"
-#include "duckdb/common/serializer/memory_stream.hpp"
-#include "duckdb/common/serializer/binary_serializer.hpp"
-#include "duckdb/common/serializer/binary_deserializer.hpp"
 
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
@@ -27,6 +24,8 @@
 #include <unistd.h>
 #endif
 #include <algorithm>
+#include "duckdb/common/serializer/binary_serializer.hpp"
+#include "duckdb/common/serializer/binary_deserializer.hpp"
 
 namespace duckdb {
 
@@ -126,7 +125,8 @@ TaskScheduler::TaskScheduler(DatabaseInstance &db)
     : db(db), queue(make_uniq<ConcurrentQueue>()),
       allocator_flush_threshold(db.config.options.allocator_flush_threshold),
       allocator_background_threads(db.config.options.allocator_background_threads), requested_thread_count(0),
-      current_thread_count(1), requested_process_count(0), current_process_count(0) {
+      current_thread_count(1), requested_process_count(0), current_process_count(0), allocator(), mem_stream(allocator),
+      serializer(make_uniq<BinarySerializer>(mem_stream)), deserializer(make_uniq<BinaryDeserializer>(mem_stream)) {
 	SetAllocatorBackgroundThreads(db.config.options.allocator_background_threads);
 }
 
@@ -523,7 +523,6 @@ void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, 
 	idx_t num_procs = processes.size();
 
 	// duplicate the chunk for each process
-	Allocator allocator;
 	vector<DataChunk> split_chunks(num_procs);
 	for (idx_t i = 0; i < num_procs; ++i) {
 		split_chunks[i].Initialize(allocator, chunk.GetTypes());
@@ -538,18 +537,20 @@ void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, 
 		split_chunks[i].Slice(start_row, num_rows);
 	}
 
-	// now for each process, serialize its chunk
+	// send each process its partial chunk
 	for (idx_t i = 0; i < num_procs; ++i) {
+
 		// serialize the input data chunk
-		MemoryStream mem_stream(allocator);
-		BinarySerializer serializer(mem_stream);
-		serializer.Begin();
-		split_chunks[i].Serialize(serializer);
-		serializer.End();
+		serializer->Begin();
+		split_chunks[i].Serialize(*serializer);
+		serializer->End();
 
 		// get the length and buffer
 		idx_t length = mem_stream.GetPosition();
 		auto *data = mem_stream.GetData();
+
+		// reset the stream
+		mem_stream.Rewind();
 
 		// send the function index
 		BlockingWrite(processes[i].to_child[1], &function_index, sizeof(idx_t));
@@ -561,7 +562,7 @@ void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, 
 		BlockingWrite(processes[i].to_child[1], data, length);
 	}
 
-	// now for each process, get the result vector back and write it out the final result vector
+	// receive the partial result from each process and combine them
 	for (idx_t i = 0; i < num_procs; ++i) {
 
 		// compute range for process
@@ -579,16 +580,17 @@ void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, 
 		// read the result vector
 		BlockingRead(processes[i].from_child[0], payload.data(), payload_length);
 
-		// deserialize the payload
-		Allocator allocator;
-		MemoryStream mem_stream(allocator);
+		// write the payload into the memory stream
 		mem_stream.WriteData(payload.data(), payload_length);
 		mem_stream.Rewind();
-		BinaryDeserializer deserializer(mem_stream);
+
+		// deserialize the partial result
 		Vector partial_result(return_type);
-		deserializer.Begin();
-		partial_result.Deserialize(deserializer, num_rows);
-		deserializer.End();
+		deserializer->Begin();
+		partial_result.Deserialize(*deserializer, num_rows);
+		deserializer->End();
+
+		// reset the stream
 		mem_stream.Rewind();
 
 		// now copy the partial result from this process into the final result
@@ -613,16 +615,16 @@ void TaskScheduler::WorkerCallUDF(int read_fd, int write_fd) {
 	// read in the payload
 	BlockingRead(read_fd, payload.data(), payload_length);
 
-	// deserialize the payload
-	Allocator allocator;
-	MemoryStream mem_stream(allocator);
+	// write the payload into the memory stream
 	mem_stream.WriteData(payload.data(), payload_length);
 	mem_stream.Rewind();
-	BinaryDeserializer deserializer(mem_stream);
+
+	// deserialize it into the input chunk
 	DataChunk input;
-	deserializer.Begin();
-	input.Deserialize(deserializer);
-	deserializer.End();
+	deserializer->Begin();
+	input.Deserialize(*deserializer);
+	deserializer->End();
+	// reset the stream
 	mem_stream.Rewind();
 
 	// call the UDF
@@ -632,10 +634,9 @@ void TaskScheduler::WorkerCallUDF(int read_fd, int write_fd) {
 	func(input, result);
 
 	// serialize the resulting output vector
-	BinarySerializer serializer(mem_stream);
-	serializer.Begin();
-	result.Serialize(serializer, input.size());
-	serializer.End();
+	serializer->Begin();
+	result.Serialize(*serializer, input.size());
+	serializer->End();
 	idx_t output_length = mem_stream.GetPosition();
 	mem_stream.Rewind();
 	auto *output_data = mem_stream.GetData();

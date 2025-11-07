@@ -12,6 +12,7 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/vector.hpp"
+#include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/parallel/task.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include <sys/types.h>
@@ -25,6 +26,8 @@ struct QueueProducerToken;
 class ClientContext;
 class DatabaseInstance;
 class TaskScheduler;
+class BinarySerializer;
+class BinaryDeserializer;
 
 struct SchedulerThread;
 
@@ -144,6 +147,14 @@ private:
 	atomic<int32_t> requested_process_count;
 	//! The amount of processes currently running
 	atomic<int32_t> current_process_count;
+	//! Allocator
+	Allocator allocator;
+	//! Memory Stream
+	MemoryStream mem_stream;
+	//! Serializer
+	unique_ptr<BinarySerializer> serializer;
+	//! Deserializer
+	unique_ptr<BinaryDeserializer> deserializer;
 };
 
 } // namespace duckdb
