@@ -58,11 +58,12 @@ class TaskScheduler {
 	constexpr static idx_t EXIT_FUNCTION_INDEX = DConstants::INVALID_INDEX;
 
 	struct SharedWorkerBlock {
-		atomic<int> futex;
-		atomic<int> input_size;
-		atomic<int> output_size;
-		idx_t function_index;
-		alignas(64) data_t buffer[SHM_BUFFER_SIZE];
+		alignas(64) atomic<int> futex_cmd;  // parent -> worker (command signal)
+		alignas(64) atomic<int> futex_done; // worker -> parent (completion signal)
+		alignas(64) idx_t function_index;
+
+		alignas(64) data_t input_buffer[SHM_BUFFER_SIZE];  // parent writes, worker reads
+		alignas(64) data_t output_buffer[SHM_BUFFER_SIZE]; // worker writes, parent reads
 	};
 
 	struct ProcessState {

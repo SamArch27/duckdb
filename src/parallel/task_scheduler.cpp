@@ -474,7 +474,7 @@ void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function
 		auto *block = proc.shared_block;
 
 		idx_t start_row = i * chunk.size() / num_procs;
-		idx_t end_row = (i + 1) * chunk.size() / num_procs;
+		idx_t end_row = (i == num_procs - 1) ? chunk.size() : (i + 1) * chunk.size() / num_procs;
 		idx_t num_rows = end_row - start_row;
 
 		// create a slice of the input data chunk for this worker
@@ -484,17 +484,16 @@ void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function
 		slice.Slice(start_row, num_rows);
 
 		// serialize it into shared memory
-		MemoryStream input_stream(static_cast<data_ptr_t>(block->buffer), SHM_BUFFER_SIZE);
-		BinarySerializer serializer(input_stream);
-		serializer.Begin();
-		slice.Serialize(serializer);
-		serializer.End();
+		auto input_stream = make_uniq<MemoryStream>(static_cast<data_ptr_t>(block->input_buffer), SHM_BUFFER_SIZE);
+		auto serializer = make_uniq<BinarySerializer>(*input_stream);
+		serializer->Begin();
+		slice.Serialize(*serializer);
+		serializer->End();
 
 		// signal the worker to process it
-		block->input_size = input_stream.GetPosition();
 		block->function_index = function_index;
-		block->futex.store(1, std::memory_order_release);
-		futex_wake(&block->futex);
+		block->futex_cmd.store(1, std::memory_order_release);
+		futex_wake(&block->futex_cmd);
 	}
 
 	// receive the partial result from each process and combine them
@@ -503,36 +502,37 @@ void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function
 		auto *block = proc.shared_block;
 
 		// block until the process is done
-		while (block->futex.load(std::memory_order_acquire) != 2) {
-			futex_wait(&block->futex, 1);
+		while (block->futex_done.load(std::memory_order_acquire) != 1) {
+			futex_wait(&block->futex_done, 0);
 		}
 
 		// compute range for process
 		idx_t start_row = i * chunk.size() / num_procs;
-		idx_t end_row = (i + 1) * chunk.size() / num_procs;
+		idx_t end_row = (i == num_procs - 1) ? chunk.size() : (i + 1) * chunk.size() / num_procs;
 		idx_t num_rows = end_row - start_row;
 
 		// read back the partial result
-		MemoryStream output_stream(static_cast<data_ptr_t>(block->buffer), SHM_BUFFER_SIZE);
-		BinaryDeserializer deserializer(output_stream);
+		auto output_stream = make_uniq<MemoryStream>(static_cast<data_ptr_t>(block->output_buffer), SHM_BUFFER_SIZE);
+		auto deserializer = make_uniq<BinaryDeserializer>(*output_stream);
 		Vector partial_result(return_type);
-		deserializer.Begin();
-		partial_result.Deserialize(deserializer, num_rows);
-		deserializer.End();
+		deserializer->Begin();
+		partial_result.Deserialize(*deserializer, num_rows);
+		deserializer->End();
 
 		// now copy the partial result from this process into the final result
 		VectorOperations::Copy(partial_result, result, num_rows, 0, start_row);
 
-		// put the worker back to sleep
-		block->futex.store(0, std::memory_order_release);
+		// put the worker back to sleep (resetting futexes)
+		block->futex_done.store(0, std::memory_order_release);
+		block->futex_cmd.store(0, std::memory_order_release);
 	}
 }
 
 void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd) {
 	while (true) {
 		// block on futex
-		while (block->futex.load(std::memory_order_acquire) != 1) {
-			futex_wait(&block->futex, 0);
+		while (block->futex_cmd.load(std::memory_order_acquire) != 1) {
+			futex_wait(&block->futex_cmd, 0);
 		}
 
 		// check for exit signal
@@ -544,12 +544,12 @@ void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd) {
 		}
 
 		// read the partial input chunk
-		MemoryStream input_stream(static_cast<data_ptr_t>(block->buffer), block->input_size);
-		BinaryDeserializer deserializer(input_stream);
+		auto input_stream = make_uniq<MemoryStream>(static_cast<data_ptr_t>(block->input_buffer), SHM_BUFFER_SIZE);
+		auto deserializer = make_uniq<BinaryDeserializer>(*input_stream);
 		DataChunk input;
-		deserializer.Begin();
-		input.Deserialize(deserializer);
-		deserializer.End();
+		deserializer->Begin();
+		input.Deserialize(*deserializer);
+		deserializer->End();
 
 		// call the UDF
 		inner_scalar_function_t &func = db.funcs[block->function_index];
@@ -558,16 +558,15 @@ void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd) {
 		func(input, output);
 
 		// serialize the output to shared memory
-		MemoryStream output_stream(static_cast<data_ptr_t>(block->buffer), SHM_BUFFER_SIZE);
-		BinarySerializer serializer(output_stream);
-		serializer.Begin();
-		output.Serialize(serializer, input.size());
-		serializer.End();
-		block->output_size = output_stream.GetPosition();
+		auto output_stream = make_uniq<MemoryStream>(static_cast<data_ptr_t>(block->output_buffer), SHM_BUFFER_SIZE);
+		auto serializer = make_uniq<BinarySerializer>(*output_stream);
+		serializer->Begin();
+		output.Serialize(*serializer, input.size());
+		serializer->End();
 
 		// mark done and wake parent
-		block->futex.store(2, std::memory_order_release);
-		futex_wake(&block->futex);
+		block->futex_done.store(1, std::memory_order_release);
+		futex_wake(&block->futex_done);
 	}
 }
 
@@ -582,8 +581,8 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 		for (auto &proc : processes) {
 			// send exit command via shared memory
 			proc.shared_block->function_index = EXIT_FUNCTION_INDEX;
-			proc.shared_block->futex.store(1, std::memory_order_release);
-			futex_wake(&proc.shared_block->futex);
+			proc.shared_block->futex_cmd.store(1, std::memory_order_release);
+			futex_wake(&proc.shared_block->futex_cmd);
 
 			// wait for the worker process to exit
 			int status;
@@ -620,7 +619,9 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 			}
 			// zero out the memory
 			memset(static_cast<void *>(proc.shared_block), 0, sizeof(SharedWorkerBlock));
-			proc.shared_block->futex.store(0, std::memory_order_relaxed);
+			// zero out all of the atomics
+			proc.shared_block->futex_cmd.store(0, std::memory_order_relaxed);
+			proc.shared_block->futex_done.store(0, std::memory_order_relaxed);
 		}
 
 		for (idx_t i = 0; i < to_create; i++) {
