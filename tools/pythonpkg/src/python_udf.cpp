@@ -575,7 +575,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		// otherwise parallelize over the worker processes
 		else {
 			TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db))
-			    .ExecuteUDFOnWorkers(input, function_index, result);
+			    .ExecuteUDFOnParallelWorkers(input, function_index, result);
 		}
 	};
 

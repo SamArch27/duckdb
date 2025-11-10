@@ -24,8 +24,10 @@
 #include <unistd.h>
 #endif
 #include <algorithm>
+#include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/common/serializer/binary_serializer.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
+#include <sys/mman.h>
 
 namespace duckdb {
 
@@ -125,8 +127,7 @@ TaskScheduler::TaskScheduler(DatabaseInstance &db)
     : db(db), queue(make_uniq<ConcurrentQueue>()),
       allocator_flush_threshold(db.config.options.allocator_flush_threshold),
       allocator_background_threads(db.config.options.allocator_background_threads), requested_thread_count(0),
-      current_thread_count(1), requested_process_count(0), current_process_count(0), allocator(), mem_stream(allocator),
-      serializer(make_uniq<BinarySerializer>(mem_stream)), deserializer(make_uniq<BinaryDeserializer>(mem_stream)) {
+      current_thread_count(1), requested_process_count(0), current_process_count(0), allocator() {
 	SetAllocatorBackgroundThreads(db.config.options.allocator_background_threads);
 }
 
@@ -464,214 +465,109 @@ void TaskScheduler::RelaunchThreadsInternal(int32_t n) {
 #endif
 }
 
-void TaskScheduler::BlockingRead(int read_fd, void *buf, size_t len) {
-
-	// read the desired in out, until reading the desired length
-	size_t bytes_read = 0;
-	data_t *ptr = static_cast<data_t *>(buf);
-
-	while (bytes_read < len) {
-		ssize_t ret = read(read_fd, ptr + bytes_read, len - bytes_read);
-
-		if (ret < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			throw InternalException("Error! Blocking read failed!");
-		}
-
-		if (ret == 0) {
-			break;
-		}
-
-		bytes_read += ret;
-	}
-}
-
-void TaskScheduler::BlockingWrite(int write_fd, const void *buf, size_t len) {
-
-	// write the desired bytes out, until writing the desired length
-	size_t bytes_written = 0;
-	const data_t *ptr = static_cast<const data_t *>(buf);
-
-	while (bytes_written < len) {
-		ssize_t ret = write(write_fd, ptr + bytes_written, len - bytes_written);
-
-		if (ret < 0) {
-			if (errno == EINTR) {
-				continue;
-			}
-			throw InternalException("Error! Blocking read failed!");
-		}
-
-		if (ret == 0) {
-			throw InternalException("Error! Didn't read the full payload!");
-		}
-
-		bytes_written += ret;
-	}
-}
-
-void TaskScheduler::ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, Vector &result) {
-
+void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result) {
 	LogicalType return_type = db.func_return_types[function_index];
-	for (auto &proc : processes) {
-		// Send the UDF command to all processes
-		BlockingWrite(proc.to_child[1], &CALL_UDF_COMMAND, sizeof(WorkerCommand));
-	}
-
 	idx_t num_procs = processes.size();
 
-	// duplicate the chunk for each process
-	vector<DataChunk> split_chunks(num_procs);
 	for (idx_t i = 0; i < num_procs; ++i) {
-		split_chunks[i].Initialize(allocator, chunk.GetTypes());
-		split_chunks[i].Reference(chunk);
-	}
+		auto &proc = processes[i];
+		auto *block = proc.shared_block;
 
-	// now slice each chunk to have access to the correct range of rows
-	for (idx_t i = 0; i < num_procs; ++i) {
 		idx_t start_row = i * chunk.size() / num_procs;
 		idx_t end_row = (i + 1) * chunk.size() / num_procs;
 		idx_t num_rows = end_row - start_row;
-		split_chunks[i].Slice(start_row, num_rows);
-	}
 
-	// send each process its partial chunk
-	for (idx_t i = 0; i < num_procs; ++i) {
+		// create a slice of the input data chunk for this worker
+		DataChunk slice;
+		slice.Initialize(allocator, chunk.GetTypes());
+		slice.Reference(chunk);
+		slice.Slice(start_row, num_rows);
 
-		// serialize the input data chunk
-		serializer->Begin();
-		split_chunks[i].Serialize(*serializer);
-		serializer->End();
+		// serialize it into shared memory
+		MemoryStream input_stream(static_cast<data_ptr_t>(block->buffer), SHM_BUFFER_SIZE);
+		BinarySerializer serializer(input_stream);
+		serializer.Begin();
+		slice.Serialize(serializer);
+		serializer.End();
 
-		// get the length and buffer
-		idx_t length = mem_stream.GetPosition();
-		auto *data = mem_stream.GetData();
-
-		// reset the stream
-		mem_stream.Rewind();
-
-		// send the function index
-		BlockingWrite(processes[i].to_child[1], &function_index, sizeof(idx_t));
-
-		// send the length of the payload
-		BlockingWrite(processes[i].to_child[1], &length, sizeof(idx_t));
-
-		// then send the payload
-		BlockingWrite(processes[i].to_child[1], data, length);
+		// signal the worker to process it
+		block->input_size = input_stream.GetPosition();
+		block->function_index = function_index;
+		block->futex.store(1, std::memory_order_release);
+		futex_wake(&block->futex);
 	}
 
 	// receive the partial result from each process and combine them
 	for (idx_t i = 0; i < num_procs; ++i) {
+		auto &proc = processes[i];
+		auto *block = proc.shared_block;
+
+		// block until the process is done
+		while (block->futex.load(std::memory_order_acquire) != 2) {
+			futex_wait(&block->futex, 1);
+		}
 
 		// compute range for process
 		idx_t start_row = i * chunk.size() / num_procs;
 		idx_t end_row = (i + 1) * chunk.size() / num_procs;
 		idx_t num_rows = end_row - start_row;
 
-		// read the payload length
-		idx_t payload_length = DConstants::INVALID_INDEX;
-		BlockingRead(processes[i].from_child[0], &payload_length, sizeof(idx_t));
-
-		// allocate a buffer for the payload
-		vector<data_t> payload(payload_length);
-
-		// read the result vector
-		BlockingRead(processes[i].from_child[0], payload.data(), payload_length);
-
-		// write the payload into the memory stream
-		mem_stream.WriteData(payload.data(), payload_length);
-		mem_stream.Rewind();
-
-		// deserialize the partial result
+		// read back the partial result
+		MemoryStream output_stream(static_cast<data_ptr_t>(block->buffer), SHM_BUFFER_SIZE);
+		BinaryDeserializer deserializer(output_stream);
 		Vector partial_result(return_type);
-		deserializer->Begin();
-		partial_result.Deserialize(*deserializer, num_rows);
-		deserializer->End();
-
-		// reset the stream
-		mem_stream.Rewind();
+		deserializer.Begin();
+		partial_result.Deserialize(deserializer, num_rows);
+		deserializer.End();
 
 		// now copy the partial result from this process into the final result
 		VectorOperations::Copy(partial_result, result, num_rows, 0, start_row);
+
+		// put the worker back to sleep
+		block->futex.store(0, std::memory_order_release);
 	}
 }
 
-void TaskScheduler::WorkerCallUDF(int read_fd, int write_fd) {
-
-	idx_t function_index = DConstants::INVALID_INDEX;
-	idx_t payload_length = DConstants::INVALID_INDEX;
-
-	// read the function index
-	BlockingRead(read_fd, &function_index, sizeof(idx_t));
-
-	// read the payload length
-	BlockingRead(read_fd, &payload_length, sizeof(idx_t));
-
-	// allocate a buffer for the payload
-	vector<data_t> payload(payload_length);
-
-	// read in the payload
-	BlockingRead(read_fd, payload.data(), payload_length);
-
-	// write the payload into the memory stream
-	mem_stream.WriteData(payload.data(), payload_length);
-	mem_stream.Rewind();
-
-	// deserialize it into the input chunk
-	DataChunk input;
-	deserializer->Begin();
-	input.Deserialize(*deserializer);
-	deserializer->End();
-	// reset the stream
-	mem_stream.Rewind();
-
-	// call the UDF
-	inner_scalar_function_t &func = db.funcs[function_index];
-	LogicalType func_return_type = db.func_return_types[function_index];
-	Vector result(func_return_type);
-	func(input, result);
-
-	// serialize the resulting output vector
-	serializer->Begin();
-	result.Serialize(*serializer, input.size());
-	serializer->End();
-	idx_t output_length = mem_stream.GetPosition();
-	mem_stream.Rewind();
-	auto *output_data = mem_stream.GetData();
-
-	// send the result vector back
-	// first write out the payload length
-	BlockingWrite(write_fd, &output_length, sizeof(idx_t));
-
-	// then write out the payload
-	BlockingWrite(write_fd, output_data, output_length);
-}
-
-void TaskScheduler::WorkerExit(int read_fd, int write_fd) {
-	close(read_fd);
-	close(write_fd);
-	_exit(0);
-}
-
-void TaskScheduler::RunWorkerProcess(int read_fd, int write_fd) {
-	// wait for work
-	WorkerCommand command;
+void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd) {
 	while (true) {
-		// safe read
-		ssize_t n = read(read_fd, &command, sizeof(WorkerCommand));
-		if (n <= 0) {
-			break;
+		// block on futex
+		while (block->futex.load(std::memory_order_acquire) != 1) {
+			futex_wait(&block->futex, 0);
 		}
-		switch (command) {
-		case WorkerCommand::CALL_UDF:
-			WorkerCallUDF(read_fd, write_fd);
-			break;
-		case WorkerCommand::EXIT:
-			WorkerExit(read_fd, write_fd);
-			break;
+
+		// check for exit signal
+		if (block->function_index == EXIT_FUNCTION_INDEX) {
+			// unmap shared memory region and exit
+			munmap(block, sizeof(SharedWorkerBlock));
+			close(shm_fd);
+			_exit(0);
 		}
+
+		// read the partial input chunk
+		MemoryStream input_stream(static_cast<data_ptr_t>(block->buffer), block->input_size);
+		BinaryDeserializer deserializer(input_stream);
+		DataChunk input;
+		deserializer.Begin();
+		input.Deserialize(deserializer);
+		deserializer.End();
+
+		// call the UDF
+		inner_scalar_function_t &func = db.funcs[block->function_index];
+		LogicalType func_return_type = db.func_return_types[block->function_index];
+		Vector output(func_return_type);
+		func(input, output);
+
+		// serialize the output to shared memory
+		MemoryStream output_stream(static_cast<data_ptr_t>(block->buffer), SHM_BUFFER_SIZE);
+		BinarySerializer serializer(output_stream);
+		serializer.Begin();
+		output.Serialize(serializer, input.size());
+		serializer.End();
+		block->output_size = output_stream.GetPosition();
+
+		// mark done and wake parent
+		block->futex.store(2, std::memory_order_release);
+		futex_wake(&block->futex);
 	}
 }
 
@@ -683,63 +579,75 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 	}
 	if (processes.size() > new_process_count) {
 		// we are reducing the number of processes: kill all processes
-		idx_t process_count = processes.size();
-		for (idx_t i = 0; i < process_count; ++i) {
-			// kill the child process by writing an exit message
-			BlockingWrite(processes[i].to_child[1], &EXIT_COMMAND, sizeof(WorkerCommand));
-			close(processes[i].to_child[1]);   // close parent -> child write pipe
-			close(processes[i].from_child[0]); // close child -> parent read pipe
-			// wait for it to terminate
+		for (auto &proc : processes) {
+			// send exit command via shared memory
+			proc.shared_block->function_index = EXIT_FUNCTION_INDEX;
+			proc.shared_block->futex.store(1, std::memory_order_release);
+			futex_wake(&proc.shared_block->futex);
+
+			// wait for the worker process to exit
 			int status;
-			waitpid(processes[i].pid, &status, 0);
+			waitpid(proc.pid, &status, 0);
+
+			// unmap the shared memory region and close the fd
+			munmap(proc.shared_block, sizeof(SharedWorkerBlock));
+			close(proc.shm_fd);
 		}
+
 		processes.clear();
 	}
 	if (processes.size() < new_process_count) {
 		// we are increasing the number of processes: launch them and run tasks on them
-		idx_t create_new_processes = new_process_count;
+		idx_t to_create = new_process_count;
 		// allocate space for each new process state
-		processes.resize(create_new_processes);
-		for (idx_t i = 0; i < create_new_processes; i++) {
-			// create parent to child and child to parent pipes
-			if (pipe(processes[i].to_child) == -1 || pipe(processes[i].from_child) == -1) {
-				// can't create more processes
-				break;
+		processes.resize(to_create);
+		for (idx_t i = 0; i < to_create; i++) {
+			// allocate descriptors for shared memory for this worker
+			ProcessState &proc = processes[i];
+			proc.shm_fd = memfd_create("duckdb_worker", MFD_CLOEXEC);
+			if (proc.shm_fd < 0) {
+				throw InternalException("Error: mem_fd(...) failed!");
 			}
+			// map the actual shared memory region
+			if (ftruncate(proc.shm_fd, sizeof(SharedWorkerBlock)) == -1) {
+				throw InternalException("Error: ftruncate(...) failed!");
+			}
+			proc.shared_block = static_cast<SharedWorkerBlock *>(
+			    mmap(nullptr, sizeof(SharedWorkerBlock), PROT_READ | PROT_WRITE, MAP_SHARED, proc.shm_fd, 0));
+
+			if (proc.shared_block == MAP_FAILED) {
+				throw InternalException("Error: mmap(...) failed!");
+			}
+			// zero out the memory
+			memset(static_cast<void *>(proc.shared_block), 0, sizeof(SharedWorkerBlock));
+			proc.shared_block->futex.store(0, std::memory_order_relaxed);
 		}
 
-		for (idx_t i = 0; i < create_new_processes; i++) {
+		for (idx_t i = 0; i < to_create; i++) {
 			// now fork a new processes
 			pid_t pid = fork();
 			if (pid < 0) {
-				// error creating a new process
-				break;
+				throw InternalException("Error: fork(...) failed!");
 			}
 
 			// child process
 			if (pid == 0) {
-				close(processes[i].to_child[1]);   // close parent -> child write pipe
-				close(processes[i].from_child[0]); // close child -> parent read pipe
-
-				// close other unrelated pipes
-				for (idx_t j = 0; j < create_new_processes; j++) {
+				// unmap unrelated shared memory regions for this process
+				for (idx_t j = 0; j < to_create; j++) {
 					if (i == j) {
 						continue;
 					}
-					close(processes[j].to_child[0]);
-					close(processes[j].to_child[1]);
-					close(processes[j].from_child[0]);
-					close(processes[j].from_child[1]);
+					munmap(processes[j].shared_block, sizeof(SharedWorkerBlock));
+					close(processes[j].shm_fd);
 				}
 
 				// now go and wait for work
-				RunWorkerProcess(processes[i].to_child[0], processes[i].from_child[1]);
+				RunWorkerProcess(processes[i].shared_block, processes[i].shm_fd);
+				_exit(0);
 			}
 			// parent process
 			else {
 				processes[i].pid = pid;
-				close(processes[i].to_child[0]);   // close parent -> child read pipe
-				close(processes[i].from_child[1]); // close child -> parent write pipe
 			}
 		}
 	}

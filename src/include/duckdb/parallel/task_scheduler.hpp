@@ -12,12 +12,13 @@
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/vector.hpp"
-#include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/parallel/task.hpp"
 #include "duckdb/function/scalar_function.hpp"
 #include <sys/types.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <linux/futex.h>
+#include <sys/syscall.h>
 
 namespace duckdb {
 
@@ -40,21 +41,35 @@ struct ProducerToken {
 	mutex producer_lock;
 };
 
+static inline void futex_wait(atomic<int> *f, int expected) {
+	syscall(SYS_futex, (int *)f, FUTEX_WAIT, expected, NULL, NULL, 0);
+}
+
+static inline void futex_wake(atomic<int> *f) {
+	syscall(SYS_futex, (int *)f, FUTEX_WAKE, 1, NULL, NULL, 0);
+}
+
 //! The TaskScheduler is responsible for managing tasks and threads
 class TaskScheduler {
 
-	enum class WorkerCommand : uint8_t { CALL_UDF, EXIT };
-
-	struct ProcessState {
-		int to_child[2];
-		int from_child[2];
-		pid_t pid;
-	};
-
 	// timeout for semaphore wait, default 5ms
 	constexpr static int64_t TASK_TIMEOUT_USECS = 5000;
-	constexpr static WorkerCommand CALL_UDF_COMMAND = WorkerCommand::CALL_UDF;
-	constexpr static WorkerCommand EXIT_COMMAND = WorkerCommand::EXIT;
+	constexpr static idx_t SHM_BUFFER_SIZE = 8 * 1024 * 1024;
+	constexpr static idx_t EXIT_FUNCTION_INDEX = DConstants::INVALID_INDEX;
+
+	struct SharedWorkerBlock {
+		atomic<int> futex;
+		atomic<int> input_size;
+		atomic<int> output_size;
+		idx_t function_index;
+		alignas(64) data_t buffer[SHM_BUFFER_SIZE];
+	};
+
+	struct ProcessState {
+		pid_t pid;
+		int shm_fd;
+		SharedWorkerBlock *shared_block;
+	};
 
 public:
 	explicit TaskScheduler(DatabaseInstance &db);
@@ -109,15 +124,10 @@ public:
 	//! Result do not need to be exact 'return 0' is a valid fallback strategy
 	static idx_t GetEstimatedCPUId();
 
-	void ExecuteUDFOnWorkers(DataChunk &chunk, idx_t function_index, Vector &result);
-	void WorkerCallUDF(int read_fd, int write_fd);
-	void WorkerExit(int read_fd, int write_fd);
-	void RunWorkerProcess(int read_fd, int write_fd);
+	void ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result);
+	void RunWorkerProcess(SharedWorkerBlock *block, int shm_fd);
 
 private:
-	void BlockingRead(int read_fd, void *buf, size_t len);
-	void BlockingWrite(int write_fd, const void *buf, size_t len);
-
 	void RelaunchThreadsInternal(int32_t n);
 	void RelaunchProcessesInternal(int32_t n);
 
@@ -149,12 +159,6 @@ private:
 	atomic<int32_t> current_process_count;
 	//! Allocator
 	Allocator allocator;
-	//! Memory Stream
-	MemoryStream mem_stream;
-	//! Serializer
-	unique_ptr<BinarySerializer> serializer;
-	//! Deserializer
-	unique_ptr<BinaryDeserializer> deserializer;
 };
 
 } // namespace duckdb
