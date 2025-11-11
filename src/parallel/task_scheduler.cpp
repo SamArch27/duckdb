@@ -522,14 +522,14 @@ void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function
 		// now copy the partial result from this process into the final result
 		VectorOperations::Copy(partial_result, result, num_rows, 0, start_row);
 
-		// put the worker back to sleep (resetting futexes)
+		// reset the futex
 		block->futex_done.store(0, std::memory_order_release);
-		block->futex_cmd.store(0, std::memory_order_release);
 	}
 }
 
 void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd) {
 	while (true) {
+
 		// block on futex
 		while (block->futex_cmd.load(std::memory_order_acquire) != 1) {
 			futex_wait(&block->futex_cmd, 0);
@@ -564,7 +564,8 @@ void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd) {
 		output.Serialize(*serializer, input.size());
 		serializer->End();
 
-		// mark done and wake parent
+		// reset futex and wake parent
+		block->futex_cmd.store(0, std::memory_order_release);
 		block->futex_done.store(1, std::memory_order_release);
 		futex_wake(&block->futex_done);
 	}
@@ -644,7 +645,6 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 
 				// now go and wait for work
 				RunWorkerProcess(processes[i].shared_block, processes[i].shm_fd);
-				_exit(0);
 			}
 			// parent process
 			else {
