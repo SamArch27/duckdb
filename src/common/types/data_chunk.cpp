@@ -17,6 +17,9 @@
 #include "duckdb/common/serializer/binary_serializer.hpp"
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 
+#include <chrono>
+#include <iostream>
+
 namespace duckdb {
 
 DataChunk::DataChunk() : count(0), capacity(STANDARD_VECTOR_SIZE) {
@@ -272,7 +275,6 @@ void DataChunk::Serialize(Serializer &serializer, bool compressed_serialization)
 }
 
 void DataChunk::Deserialize(Deserializer &deserializer) {
-
 	// read and set the row count
 	auto row_count = deserializer.ReadProperty<sel_t>(100, "rows");
 

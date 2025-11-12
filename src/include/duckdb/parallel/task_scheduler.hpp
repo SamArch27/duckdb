@@ -27,8 +27,7 @@ struct QueueProducerToken;
 class ClientContext;
 class DatabaseInstance;
 class TaskScheduler;
-class BinarySerializer;
-class BinaryDeserializer;
+class MemoryStream;
 
 struct SchedulerThread;
 
@@ -129,6 +128,10 @@ public:
 	void RunWorkerProcess(SharedWorkerBlock *block, int shm_fd);
 
 private:
+	idx_t SerializeVector(MemoryStream &stream, Vector &vec, idx_t count, LogicalTypeId type);
+	void SerializeDataChunk(MemoryStream &stream, DataChunk &chunk);
+	void DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk);
+
 	void RelaunchThreadsInternal(int32_t n);
 	void RelaunchProcessesInternal(int32_t n);
 

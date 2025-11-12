@@ -245,12 +245,13 @@ private:
 	//! Returns the [index] element of the Vector as a Value.
 	static Value GetValueInternal(const Vector &v, idx_t index);
 
-protected:
 	//! The vector type specifies how the data of the vector is physically stored (i.e. if it is a single repeated
 	//! constant, if it is compressed)
 	VectorType vector_type;
 	//! The type of the elements stored in the vector (e.g. integer, float)
 	LogicalType type;
+
+public:
 	//! A pointer to the data.
 	data_ptr_t data;
 

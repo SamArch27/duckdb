@@ -465,6 +465,146 @@ void TaskScheduler::RelaunchThreadsInternal(int32_t n) {
 #endif
 }
 
+idx_t TaskScheduler::SerializeVector(MemoryStream &stream, Vector &vec, idx_t count, LogicalTypeId type) {
+
+	// save position
+	auto original_pos = stream.GetPosition();
+	// now write out the vector
+	switch (vec.GetType().id()) {
+	case LogicalTypeId::VARCHAR: {
+		// cast to array of strings and write it out
+		std::cout << "Writing out vector of VARCHAR" << std::endl;
+		auto *data = FlatVector::GetData<string_t>(vec);
+		stream.WriteData(reinterpret_cast<const_data_ptr_t>(data), sizeof(string_t) * count);
+	} break;
+	default:
+		throw InternalException("Trying to serialize unsupported type!");
+	}
+
+	// now clean up string data if it's not inlined
+	switch (vec.GetType().id()) {
+	case LogicalTypeId::VARCHAR: {
+		std::cout << "Going back to update non-inlined strings!" << std::endl;
+		auto *data = FlatVector::GetData<string_t>(vec);
+		for (idx_t row = 0; row < count; ++row) {
+			// if the string is not inlined, write it out to shared memory and fix up the original pointer
+			if (!data[row].IsInlined()) {
+				std::cout << "Non-inlined string found!" << std::endl;
+				// store a pointer to where the string will be stored in shared memory
+				const char *string_shm = reinterpret_cast<const char *>(stream.GetData() + stream.GetPosition());
+				std::cout << "String is going to be written to: " << stream.GetPosition() << std::endl;
+				// get the length of the string
+				idx_t len = data[row].GetSize();
+				std::cout << "String length is: " << len << std::endl;
+				// write out the string to shared memory
+				stream.WriteData(reinterpret_cast<const_data_ptr_t>(data[row].GetData()), len);
+				std::cout << "Wrote string out to shared memory!" << std::endl;
+				// save the stream position
+				auto old_offset = stream.GetPosition();
+				std::cout << "Saving old_offset as: " << old_offset << std::endl;
+				// jump to the correct data element
+				stream.SetPosition(original_pos + sizeof(string_t) * row);
+				std::cout << "Jumping to the original string to update pointer at offset: "
+				          << original_pos + sizeof(string_t) * row;
+				// create a new string on the stack point to the one in shared memory
+				string_t updated_string(string_shm, len);
+				// write out the new updated string
+				stream.WriteData(reinterpret_cast<const_data_ptr_t>(&updated_string), sizeof(string_t));
+				std::cout << "Wrote out pointer to new string!" << std::endl;
+				// reset the stream position
+				stream.SetPosition(old_offset);
+				std::cout << "Resetting cursor back to: " << old_offset << std::endl;
+			}
+		}
+	} break;
+	default:
+		throw InternalException("Trying to serialize unsupported type!");
+	}
+
+	return stream.GetPosition() - original_pos;
+}
+
+void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk) {
+	// write the count
+	idx_t count = chunk.size();
+	stream.Write(count);
+	std::cout << "Writing chunk size: " << count << std::endl;
+
+	// write the number of columns
+	idx_t columns = chunk.ColumnCount();
+	stream.Write(columns);
+
+	std::cout << "Writing columns: " << columns << std::endl;
+
+	// write the types
+	auto types = chunk.GetTypes();
+	for (idx_t i = 0; i < columns; ++i) {
+		stream.Write(static_cast<uint8_t>(types[i].id()));
+		std::cout << "Writing type: " << types[i].ToString() << std::endl;
+	}
+
+	// now for each column we want to save the bytes written
+	auto offset_pos = stream.GetPosition();
+	std::cout << "Saving current offset of: " << offset_pos << std::endl;
+	// save the offset into this vector
+	size_t byte_offset = stream.GetPosition();
+	std::cout << "Setting new offset of: " << offset_pos + columns * sizeof(idx_t) << std::endl;
+	stream.SetPosition(offset_pos + columns * sizeof(idx_t));
+	// now for each vector, write out the vector then go back and write out its offset
+	for (idx_t i = 0; i < columns; ++i) {
+		std::cout << "Writing out vector at index: " << i << std::endl;
+		// write out the vector
+		auto bytes_written = SerializeVector(stream, chunk.data[i], count, types[i].id());
+		// save the cursor
+		auto new_pos = stream.GetPosition();
+		std::cout << "Saving current offset of: " << new_pos << std::endl;
+		// go back to the position where the bytes written should be stored
+		stream.SetPosition(offset_pos + i * sizeof(idx_t));
+		std::cout << "Updating offset to: " << offset_pos + i * sizeof(idx_t) << std::endl;
+		// write the byte offset
+		stream.Write(byte_offset);
+		std::cout << "Writing byte_offset of: " << byte_offset << std::endl;
+		// update the byte offset for the next vector
+		byte_offset = new_pos;
+		std::cout << "Updating byte_offset to: " << new_pos << std::endl;
+		// reset the cursor
+		stream.SetPosition(new_pos);
+		std::cout << "Resetting cursor to: " << new_pos << std::endl;
+	}
+}
+
+void TaskScheduler::DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk) {
+	// read the count
+	idx_t count = stream.Read<idx_t>();
+	std::cout << "Read count value of: " << count << std::endl;
+	// number of columns
+	idx_t columns = stream.Read<idx_t>();
+	std::cout << "Read columns value of: " << columns << std::endl;
+
+	// now read out the types
+	vector<LogicalTypeId> type_ids(columns);
+	stream.ReadData(reinterpret_cast<data_ptr_t>(type_ids.data()), sizeof(uint8_t) * columns);
+	// now init the data chunk
+	vector<LogicalType> types(columns);
+	for (idx_t i = 0; i < columns; ++i) {
+		types[i] = LogicalType(type_ids[i]);
+		std::cout << "Read type: " << types[i].ToString() << std::endl;
+	}
+	chunk.InitializeEmpty(types);
+	// now read out the offsets
+	vector<idx_t> offsets(columns);
+	stream.ReadData(reinterpret_cast<data_ptr_t>(offsets.data()), sizeof(uint8_t) * columns);
+	for (auto offset : offsets) {
+		std::cout << "Read offset of: " << offset << std::endl;
+	}
+	std::cout << "Assigning zero copy to each vec" << std::endl;
+	// now "zero copy" by assigning each of the chunk's vectors to appropriate pointer + offset into shared memory
+	for (idx_t i = 0; i < columns; ++i) {
+		chunk.data[i].data = stream.GetData() + offsets[i];
+	}
+	chunk.count = count;
+}
+
 void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result) {
 	LogicalType return_type = db.func_return_types[function_index];
 	idx_t num_procs = processes.size();
@@ -473,22 +613,20 @@ void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function
 		auto &proc = processes[i];
 		auto *block = proc.shared_block;
 
-		idx_t start_row = i * chunk.size() / num_procs;
-		idx_t end_row = (i == num_procs - 1) ? chunk.size() : (i + 1) * chunk.size() / num_procs;
-		idx_t num_rows = end_row - start_row;
-
-		// create a slice of the input data chunk for this worker
-		DataChunk slice;
-		slice.Initialize(allocator, chunk.GetTypes());
-		slice.Reference(chunk);
-		slice.Slice(start_row, num_rows);
-
 		// serialize it into shared memory
-		auto input_stream = make_uniq<MemoryStream>(static_cast<data_ptr_t>(block->input_buffer), SHM_BUFFER_SIZE);
-		auto serializer = make_uniq<BinarySerializer>(*input_stream);
-		serializer->Begin();
-		slice.Serialize(*serializer);
-		serializer->End();
+		std::cout << "Printing input chunk!" << std::endl;
+		std::cout << chunk.ToString() << std::endl;
+		auto input_stream = MemoryStream(static_cast<data_ptr_t>(block->input_buffer), SHM_BUFFER_SIZE);
+		SerializeDataChunk(input_stream, chunk);
+		std::cout << "Serialized!" << std::endl;
+		// Now try converting it BACK to a regular datachunk and see if it's correct
+		input_stream.Rewind();
+		DataChunk deserialized;
+		DeserializeDataChunk(input_stream, deserialized);
+		std::cout << "Deserialized!" << std::endl;
+		std::cout << "Printing deserialized input chunk!" << std::endl;
+		std::cout << deserialized.ToString() << std::endl;
+		_exit(0);
 
 		// signal the worker to process it
 		block->function_index = function_index;

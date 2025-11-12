@@ -164,9 +164,11 @@ public:
 	//! FUNCTION ONLY!
 	DUCKDB_API void Verify();
 
-private:
+public:
 	//! The amount of tuples stored in the data chunk
 	idx_t count;
+
+private:
 	//! The amount of tuples that can be stored in the data chunk
 	idx_t capacity;
 	//! Vector caches, used to store data when ::Initialize is called
