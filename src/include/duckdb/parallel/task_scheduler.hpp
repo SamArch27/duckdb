@@ -61,7 +61,7 @@ class TaskScheduler {
 		alignas(64) atomic<int> futex_done; // worker -> parent (completion signal)
 		alignas(64) idx_t function_index;
 
-		alignas(64) data_ptr_t input_buffer;               // parent writes, worker reads
+		alignas(64) data_t input_buffer[SHM_BUFFER_SIZE];  // parent writes, worker reads
 		alignas(64) data_t output_buffer[SHM_BUFFER_SIZE]; // worker writes, parent reads
 	};
 
@@ -125,11 +125,11 @@ public:
 	static idx_t GetEstimatedCPUId();
 
 	void ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result);
-	void RunWorkerProcess(SharedWorkerBlock *block, int shm_fd, idx_t worker_index);
+	void RunWorkerProcess(SharedWorkerBlock *block, int shm_fd);
 
 private:
-	void SerializeVector(MemoryStream &stream, Vector &vec, idx_t count, LogicalTypeId type);
-	void SerializeDataChunk(MemoryStream &stream, DataChunk &chunk);
+	void SerializeVector(MemoryStream &stream, Vector &vec, LogicalTypeId type, idx_t start_row, idx_t num_rows);
+	void SerializeDataChunk(MemoryStream &stream, DataChunk &chunk, idx_t start_row, idx_t num_rows);
 	void DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk);
 
 	void RelaunchThreadsInternal(int32_t n);
