@@ -465,8 +465,7 @@ void TaskScheduler::RelaunchThreadsInternal(int32_t n) {
 #endif
 }
 
-idx_t TaskScheduler::SerializeVector(MemoryStream &stream, Vector &vec, idx_t count, LogicalTypeId type) {
-
+void TaskScheduler::SerializeVector(MemoryStream &stream, Vector &vec, idx_t count, LogicalTypeId type) {
 	// save position
 	auto original_pos = stream.GetPosition();
 	// now write out the vector
@@ -520,11 +519,12 @@ idx_t TaskScheduler::SerializeVector(MemoryStream &stream, Vector &vec, idx_t co
 	default:
 		throw InternalException("Trying to serialize unsupported type!");
 	}
-
-	return stream.GetPosition() - original_pos;
 }
 
 void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk) {
+	// ensure that its flattened before serialization
+	chunk.Flatten();
+
 	// write the count
 	idx_t count = chunk.size();
 	stream.Write(count);
@@ -546,15 +546,14 @@ void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk) {
 	// now for each column we want to save the bytes written
 	auto offset_pos = stream.GetPosition();
 	std::cout << "Saving current offset of: " << offset_pos << std::endl;
+	stream.SetPosition(offset_pos + columns * sizeof(idx_t));
 	// save the offset into this vector
 	size_t byte_offset = stream.GetPosition();
-	std::cout << "Setting new offset of: " << offset_pos + columns * sizeof(idx_t) << std::endl;
-	stream.SetPosition(offset_pos + columns * sizeof(idx_t));
 	// now for each vector, write out the vector then go back and write out its offset
 	for (idx_t i = 0; i < columns; ++i) {
 		std::cout << "Writing out vector at index: " << i << std::endl;
 		// write out the vector
-		auto bytes_written = SerializeVector(stream, chunk.data[i], count, types[i].id());
+		SerializeVector(stream, chunk.data[i], count, types[i].id());
 		// save the cursor
 		auto new_pos = stream.GetPosition();
 		std::cout << "Saving current offset of: " << new_pos << std::endl;

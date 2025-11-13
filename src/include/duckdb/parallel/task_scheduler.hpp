@@ -128,7 +128,7 @@ public:
 	void RunWorkerProcess(SharedWorkerBlock *block, int shm_fd);
 
 private:
-	idx_t SerializeVector(MemoryStream &stream, Vector &vec, idx_t count, LogicalTypeId type);
+	void SerializeVector(MemoryStream &stream, Vector &vec, idx_t count, LogicalTypeId type);
 	void SerializeDataChunk(MemoryStream &stream, DataChunk &chunk);
 	void DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk);
 

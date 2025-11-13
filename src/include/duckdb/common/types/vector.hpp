@@ -255,11 +255,9 @@ public:
 	//! A pointer to the data.
 	data_ptr_t data;
 
-public:
+private:
 	//! The validity mask of the vector
 	ValidityMask validity;
-
-protected:
 	//! The main buffer holding the data of the vector
 	buffer_ptr<VectorBuffer> buffer;
 	//! The buffer holding auxiliary data of the vector
