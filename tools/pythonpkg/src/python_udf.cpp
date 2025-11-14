@@ -579,7 +579,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		}
 	};
 
-	// TODO: Push back the lambda WITHOUT any state parameter
 	funcs.push_back(inner_func);
 	func_return_types.push_back(return_type);
 	return func;

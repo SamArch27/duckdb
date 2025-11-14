@@ -509,8 +509,9 @@ void TaskScheduler::SerializeVector(MemoryStream &stream, Vector &vec, LogicalTy
 				// jump to the correct data element
 				stream.SetPosition(original_pos + sizeof(string_t) * row);
 
-				// create a new string on the stack point to the one in shared memory
+				// create a new string on the stack that points to the copied string in shared memory
 				string_t updated_string(string_shm, len);
+
 				// write out the new updated string
 				stream.WriteData(reinterpret_cast<const_data_ptr_t>(&updated_string), sizeof(string_t));
 
@@ -528,6 +529,7 @@ void TaskScheduler::SerializeVector(MemoryStream &stream, Vector &vec, LogicalTy
 }
 
 void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk, idx_t start_row, idx_t num_rows) {
+
 	// ensure that its flattened before serialization
 	chunk.Flatten();
 
@@ -547,15 +549,18 @@ void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk, i
 
 	// now for each column we want to save the bytes written
 	auto offset_pos = stream.GetPosition();
+
 	stream.SetPosition(offset_pos + columns * sizeof(idx_t));
 
 	// save the offset into this vector
-	size_t byte_offset = stream.GetPosition();
+	idx_t byte_offset = stream.GetPosition();
+
 	// now for each vector, write out the vector then go back and write out its offset
 	for (idx_t i = 0; i < columns; ++i) {
 
 		// write out the vector
 		SerializeVector(stream, chunk.data[i], types[i].id(), start_row, num_rows);
+
 		// save the cursor
 		auto new_pos = stream.GetPosition();
 
@@ -574,6 +579,7 @@ void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk, i
 }
 
 void TaskScheduler::DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk) {
+
 	// read the count
 	idx_t count = stream.Read<idx_t>();
 
@@ -583,6 +589,7 @@ void TaskScheduler::DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk)
 	// now read out the types
 	vector<LogicalTypeId> type_ids(columns);
 	stream.ReadData(reinterpret_cast<data_ptr_t>(type_ids.data()), sizeof(uint8_t) * columns);
+
 	// now init the data chunk
 	vector<LogicalType> types(columns);
 	for (idx_t i = 0; i < columns; ++i) {
@@ -592,7 +599,7 @@ void TaskScheduler::DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk)
 
 	// now read out the offsets
 	vector<idx_t> offsets(columns);
-	stream.ReadData(reinterpret_cast<data_ptr_t>(offsets.data()), sizeof(uint8_t) * columns);
+	stream.ReadData(reinterpret_cast<data_ptr_t>(offsets.data()), sizeof(idx_t) * columns);
 
 	// now "zero copy" by assigning each of the chunk's vectors to appropriate pointer + offset into shared memory
 	for (idx_t i = 0; i < columns; ++i) {
