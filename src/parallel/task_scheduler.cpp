@@ -29,6 +29,8 @@
 #include "duckdb/common/serializer/binary_deserializer.hpp"
 #include <sys/mman.h>
 
+#include <iostream>
+
 namespace duckdb {
 
 struct SchedulerThread {
@@ -129,6 +131,23 @@ TaskScheduler::TaskScheduler(DatabaseInstance &db)
       allocator_background_threads(db.config.options.allocator_background_threads), requested_thread_count(0),
       current_thread_count(1), requested_process_count(0), current_process_count(0), allocator() {
 	SetAllocatorBackgroundThreads(db.config.options.allocator_background_threads);
+
+	input_buffer_fd = memfd_create("duckdb_parent", MFD_CLOEXEC);
+	if (input_buffer_fd < 0) {
+		throw InternalException("Error: mem_fd(...) failed!");
+	}
+	// map the actual shared memory region
+	if (ftruncate(input_buffer_fd, SHM_BUFFER_SIZE) == -1) {
+		throw InternalException("Error: ftruncate(...) failed!");
+	}
+	input_buffer =
+	    static_cast<data_ptr_t>(mmap(nullptr, SHM_BUFFER_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, input_buffer_fd, 0));
+
+	if (input_buffer == MAP_FAILED) {
+		throw InternalException("Error: mmap(...) failed!");
+	}
+	// zero out the memory
+	memset(static_cast<void *>(input_buffer), 0, SHM_BUFFER_SIZE);
 }
 
 TaskScheduler::~TaskScheduler() {
@@ -139,6 +158,8 @@ TaskScheduler::~TaskScheduler() {
 	} catch (...) {
 		// nothing we can do in the destructor if this fails
 	}
+	munmap(input_buffer, sizeof(SHM_BUFFER_SIZE));
+	close(input_buffer_fd);
 #endif
 }
 
@@ -465,21 +486,31 @@ void TaskScheduler::RelaunchThreadsInternal(int32_t n) {
 #endif
 }
 
-void TaskScheduler::SerializeVector(MemoryStream &stream, Vector &vec, LogicalTypeId type, idx_t start_row,
-                                    idx_t num_rows) {
+void TaskScheduler::SerializeVector(MemoryStream &stream, Vector &vec, LogicalTypeId type, idx_t count) {
 	// save position
 	auto original_pos = stream.GetPosition();
+
 	// now write out the vector
 	switch (vec.GetType().id()) {
 	case LogicalTypeId::BIGINT: {
 		// cast to array of strings and write it out
-		auto *data = FlatVector::GetData<int64_t>(vec) + start_row;
-		stream.WriteData(reinterpret_cast<const_data_ptr_t>(data), sizeof(int64_t) * num_rows);
+		auto *data = FlatVector::GetData<int64_t>(vec);
+		stream.WriteData(reinterpret_cast<const_data_ptr_t>(data), sizeof(int64_t) * count);
+	} break;
+	case LogicalTypeId::FLOAT: {
+		// cast to array of strings and write it out
+		auto *data = FlatVector::GetData<float>(vec);
+		stream.WriteData(reinterpret_cast<const_data_ptr_t>(data), sizeof(float) * count);
+	} break;
+	case LogicalTypeId::DOUBLE: {
+		// cast to array of strings and write it out
+		auto *data = FlatVector::GetData<double>(vec);
+		stream.WriteData(reinterpret_cast<const_data_ptr_t>(data), sizeof(double) * count);
 	} break;
 	case LogicalTypeId::VARCHAR: {
 		// cast to array of strings and write it out
-		auto *data = FlatVector::GetData<string_t>(vec) + start_row;
-		stream.WriteData(reinterpret_cast<const_data_ptr_t>(data), sizeof(string_t) * num_rows);
+		auto *data = FlatVector::GetData<string_t>(vec);
+		stream.WriteData(reinterpret_cast<const_data_ptr_t>(data), sizeof(string_t) * count);
 	} break;
 	default:
 		throw InternalException("Trying to serialize unsupported type!");
@@ -489,8 +520,14 @@ void TaskScheduler::SerializeVector(MemoryStream &stream, Vector &vec, LogicalTy
 	switch (vec.GetType().id()) {
 	case LogicalTypeId::VARCHAR: {
 		// access data pointer at the correct offset
-		auto *data = FlatVector::GetData<string_t>(vec) + start_row;
-		for (idx_t row = 0; row < num_rows; ++row) {
+		auto *data = FlatVector::GetData<string_t>(vec);
+		for (idx_t row = 0; row < count; ++row) {
+
+			// skip NULLs here
+			if (!vec.validity.RowIsValid(row)) {
+				continue;
+			}
+
 			// if the string is not inlined, write it out to shared memory and fix up the original pointer
 			if (!data[row].IsInlined()) {
 
@@ -522,20 +559,22 @@ void TaskScheduler::SerializeVector(MemoryStream &stream, Vector &vec, LogicalTy
 	} break;
 	// no fixup needed for primitive types
 	case LogicalTypeId::BIGINT:
+	case LogicalTypeId::FLOAT:
+	case LogicalTypeId::DOUBLE:
 		break;
 	default:
 		throw InternalException("Trying to serialize unsupported type!");
 	}
 }
 
-void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk, idx_t start_row, idx_t num_rows) {
+void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk) {
 
 	// ensure that its flattened before serialization
 	chunk.Flatten();
 
-	// write the count
-	idx_t count = num_rows;
-	stream.Write(count);
+	// write the total count
+	idx_t total_count = chunk.size();
+	stream.Write(total_count);
 
 	// write the number of columns
 	idx_t columns = chunk.ColumnCount();
@@ -547,19 +586,21 @@ void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk, i
 		stream.Write(static_cast<uint8_t>(types[i].id()));
 	}
 
-	// now for each column we want to save the bytes written
+	// now for each column we want to save the validity offsets
 	auto offset_pos = stream.GetPosition();
-
 	stream.SetPosition(offset_pos + columns * sizeof(idx_t));
-
-	// save the offset into this vector
-	idx_t byte_offset = stream.GetPosition();
 
 	// now for each vector, write out the vector then go back and write out its offset
 	for (idx_t i = 0; i < columns; ++i) {
 
+		// save the offset into this vector
+		idx_t validity_offset = stream.GetPosition();
+
+		// serialize the vector's validity mask
+		chunk.data[i].validity.Write(stream, chunk.size());
+
 		// write out the vector
-		SerializeVector(stream, chunk.data[i], types[i].id(), start_row, num_rows);
+		SerializeVector(stream, chunk.data[i], types[i].id(), chunk.size());
 
 		// save the cursor
 		auto new_pos = stream.GetPosition();
@@ -567,11 +608,8 @@ void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk, i
 		// go back to the position where the bytes written should be stored
 		stream.SetPosition(offset_pos + i * sizeof(idx_t));
 
-		// write the byte offset
-		stream.Write(byte_offset);
-
-		// update the byte offset for the next vector
-		byte_offset = new_pos;
+		// write the validity offset
+		stream.Write(validity_offset);
 
 		// reset the cursor
 		stream.SetPosition(new_pos);
@@ -581,7 +619,8 @@ void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk, i
 void TaskScheduler::DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk) {
 
 	// read the count
-	idx_t count = stream.Read<idx_t>();
+
+	idx_t total_count = stream.Read<idx_t>();
 
 	// number of columns
 	idx_t columns = stream.Read<idx_t>();
@@ -601,29 +640,35 @@ void TaskScheduler::DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk)
 	vector<idx_t> offsets(columns);
 	stream.ReadData(reinterpret_cast<data_ptr_t>(offsets.data()), sizeof(idx_t) * columns);
 
-	// now "zero copy" by assigning each of the chunk's vectors to appropriate pointer + offset into shared memory
+	// set the validity mask for each vector
 	for (idx_t i = 0; i < columns; ++i) {
-		chunk.data[i].data = stream.GetData() + offsets[i];
+		// advance the cursor to the offset of the validity mask
+
+		stream.SetPosition(offsets[i]);
+		// read the validity mask
+		chunk.data[i].validity.Read(stream, total_count);
+
+		idx_t data_offset = stream.GetPosition();
+
+		// zero copy the data into the vector
+		chunk.data[i].data = stream.GetData() + data_offset;
 	}
-	chunk.count = count;
+
+	// assign the sliced number of rows
+	chunk.count = total_count;
 }
 
 void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result) {
 	LogicalType return_type = db.func_return_types[function_index];
 	idx_t num_procs = processes.size();
 
+	// serialize input
+	auto input_stream = MemoryStream(static_cast<data_ptr_t>(input_buffer), SHM_BUFFER_SIZE);
+	SerializeDataChunk(input_stream, chunk);
+
 	for (idx_t i = 0; i < num_procs; ++i) {
 		auto &proc = processes[i];
 		auto *block = proc.shared_block;
-
-		// compute range for process
-		idx_t start_row = i * chunk.size() / num_procs;
-		idx_t end_row = (i == num_procs - 1) ? chunk.size() : (i + 1) * chunk.size() / num_procs;
-		idx_t num_rows = end_row - start_row;
-
-		// serialize it into shared memory
-		auto input_stream = MemoryStream(static_cast<data_ptr_t>(block->input_buffer), SHM_BUFFER_SIZE);
-		SerializeDataChunk(input_stream, chunk, start_row, num_rows);
 
 		// signal the worker to process it
 		block->function_index = function_index;
@@ -644,7 +689,7 @@ void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function
 		// compute range for process
 		idx_t start_row = i * chunk.size() / num_procs;
 		idx_t end_row = (i == num_procs - 1) ? chunk.size() : (i + 1) * chunk.size() / num_procs;
-		idx_t num_rows = end_row - start_row;
+		idx_t sliced_count = end_row - start_row;
 
 		// read back the partial result
 		auto output_stream = MemoryStream(static_cast<data_ptr_t>(block->output_buffer), SHM_BUFFER_SIZE);
@@ -652,14 +697,14 @@ void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function
 		DeserializeDataChunk(output_stream, output);
 
 		// now copy the partial result from this process into the final result
-		VectorOperations::Copy(output.data[0], result, num_rows, 0, start_row);
+		VectorOperations::Copy(output.data[0], result, sliced_count, 0, start_row);
 
 		// reset the futex
 		block->futex_done.store(0, std::memory_order_release);
 	}
 }
 
-void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd) {
+void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd, idx_t worker_index) {
 	while (true) {
 
 		// block on futex
@@ -682,6 +727,13 @@ void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd) {
 		DataChunk input;
 		DeserializeDataChunk(input_stream, input);
 
+		// slice the data chunk to the correct range
+		auto num_procs = processes.size();
+		idx_t start_row = worker_index * input.size() / num_procs;
+		idx_t end_row = (worker_index == num_procs - 1) ? input.size() : (worker_index + 1) * input.size() / num_procs;
+		idx_t sliced_count = end_row - start_row;
+		input.Slice(start_row, sliced_count);
+
 		// now create a new DataChunk which will hold the result
 		DataChunk output;
 		output.SetCardinality(input.size());
@@ -694,7 +746,7 @@ void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd) {
 
 		// now serialize the output DataChunk
 		auto output_stream = MemoryStream(static_cast<data_ptr_t>(block->output_buffer), SHM_BUFFER_SIZE);
-		SerializeDataChunk(output_stream, output, 0, output.size());
+		SerializeDataChunk(output_stream, output);
 
 		// reset futex and wake parent
 		block->futex_cmd.store(0, std::memory_order_release);
@@ -755,6 +807,7 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 			// zero out all of the atomics
 			proc.shared_block->futex_cmd.store(0, std::memory_order_relaxed);
 			proc.shared_block->futex_done.store(0, std::memory_order_relaxed);
+			proc.shared_block->input_buffer = input_buffer;
 		}
 
 		for (idx_t i = 0; i < to_create; i++) {
@@ -776,7 +829,7 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 				}
 
 				// now go and wait for work
-				RunWorkerProcess(processes[i].shared_block, processes[i].shm_fd);
+				RunWorkerProcess(processes[i].shared_block, processes[i].shm_fd, i);
 			}
 			// parent process
 			else {

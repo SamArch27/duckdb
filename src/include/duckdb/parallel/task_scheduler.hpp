@@ -53,7 +53,7 @@ class TaskScheduler {
 
 	// timeout for semaphore wait, default 5ms
 	constexpr static int64_t TASK_TIMEOUT_USECS = 5000;
-	constexpr static idx_t SHM_BUFFER_SIZE = 8 * 1024 * 1024;
+	constexpr static idx_t SHM_BUFFER_SIZE = 64 * 1024 * 1024;
 	constexpr static idx_t EXIT_FUNCTION_INDEX = DConstants::INVALID_INDEX;
 
 	struct SharedWorkerBlock {
@@ -61,7 +61,7 @@ class TaskScheduler {
 		alignas(64) atomic<int> futex_done; // worker -> parent (completion signal)
 		alignas(64) idx_t function_index;
 
-		alignas(64) data_t input_buffer[SHM_BUFFER_SIZE];  // parent writes, worker reads
+		alignas(64) data_ptr_t input_buffer;               // parent writes, worker reads
 		alignas(64) data_t output_buffer[SHM_BUFFER_SIZE]; // worker writes, parent reads
 	};
 
@@ -125,11 +125,11 @@ public:
 	static idx_t GetEstimatedCPUId();
 
 	void ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result);
-	void RunWorkerProcess(SharedWorkerBlock *block, int shm_fd);
+	void RunWorkerProcess(SharedWorkerBlock *block, int shm_fd, idx_t worker_index);
 
 private:
-	void SerializeVector(MemoryStream &stream, Vector &vec, LogicalTypeId type, idx_t start_row, idx_t num_rows);
-	void SerializeDataChunk(MemoryStream &stream, DataChunk &chunk, idx_t start_row, idx_t num_rows);
+	void SerializeVector(MemoryStream &stream, Vector &vec, LogicalTypeId type, idx_t count);
+	void SerializeDataChunk(MemoryStream &stream, DataChunk &chunk);
 	void DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk);
 
 	void RelaunchThreadsInternal(int32_t n);
@@ -163,6 +163,10 @@ private:
 	atomic<int32_t> current_process_count;
 	//! Allocator
 	Allocator allocator;
+	// fd for shared memory
+	int input_buffer_fd;
+	// shared memory for DataChunk input
+	alignas(64) data_ptr_t input_buffer; // worker writes, parent reads
 };
 
 } // namespace duckdb
