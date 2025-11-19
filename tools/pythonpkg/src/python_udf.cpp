@@ -568,14 +568,96 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	idx_t function_index = funcs.size();
 
 	scalar_function_t func = [=, &db](DataChunk &input, ExpressionState &state, Vector &result) -> void {
-		// execute the UDF directly if there are no python processes
-		if (DBConfig::GetConfig(state.GetContext()).options.maximum_python_processes == 0) {
-			inner_func(input, result);
-		}
-		// otherwise parallelize over the worker processes
-		else {
-			TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db))
-			    .ExecuteUDFOnParallelWorkers(input, function_index, result);
+		// lookup UDF caching flag
+		bool udf_caching = DBConfig::GetConfig(state.GetContext()).options.udf_caching;
+
+		// check for udf caching
+		if (udf_caching) {
+
+			// create a new data chunk to reference this one
+			DataChunk sliced_input;
+			auto input_types = input.GetTypes();
+			sliced_input.InitializeEmpty(input_types);
+			sliced_input.Reference(input);
+
+			// create state for the cache lookup
+			Vector addresses(LogicalType::POINTER);
+			SelectionVector misses;
+			misses.Initialize();
+
+			// check if the UDF cache has been created
+			auto &map = state.GetContext().db->GetUDFCache();
+			auto it = map.find(static_cast<void *>(function));
+
+			// create it if it hasn't been created yet
+			if (it == map.end()) {
+				it = map.emplace(static_cast<void *>(function), MakeCache(input, state, result)).first;
+			}
+			auto &cache = it->second;
+
+			// lookup the DataChunk in the cache and see which indexes are misses
+			idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
+
+			// create a vector to store the result
+			Vector sliced_result(result.GetType());
+			sliced_result.Flatten(miss_count);
+
+			// create a sliced input and only compute the UDF on the misses
+			sliced_input.Slice(misses, miss_count);
+
+			// execute the UDF directly if there are no python processes
+			if (DBConfig::GetConfig(state.GetContext()).options.maximum_python_processes == 0) {
+				if (miss_count != 0) {
+
+					inner_func(sliced_input, sliced_result);
+				}
+			}
+			// otherwise parallelize over the worker processes
+			else {
+				auto &scheduler = TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db));
+				if (miss_count != 0) {
+
+					scheduler.ExecuteUDFOnParallelWorkers(sliced_input, function_index, sliced_result);
+				}
+			}
+
+			// for each miss, copy it into the correct location in the output
+			for (idx_t source = 0; source < miss_count; ++source) {
+				idx_t target = misses[source];
+				result.SetValue(target, sliced_result.GetValue(source));
+			}
+
+			// create a DataChunk referencing the output result vector
+			DataChunk output;
+			auto result_type = vector<LogicalType>(1, result.GetType());
+			output.Initialize(Allocator::DefaultAllocator(), result_type);
+			output.SetCardinality(input);
+			output.data[0].Reference(result);
+
+			// insert the new values into the cache (if there are any)
+			if (miss_count != 0) {
+
+				cache->AddChunk(input, output, AggregateType::NON_DISTINCT);
+			}
+
+			// now copy the contents of the UDF cache to the real result vector
+			RowOperationsState row_state(cache->GetAggregateAllocatorRef());
+			RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, output, 0);
+
+		} else {
+
+			// execute the UDF directly if there are no python processes
+			if (DBConfig::GetConfig(state.GetContext()).options.maximum_python_processes == 0) {
+
+				inner_func(input, result);
+
+			}
+			// otherwise parallelize over the worker processes
+			else {
+				auto &scheduler = TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db));
+
+				scheduler.ExecuteUDFOnParallelWorkers(input, function_index, result);
+			}
 		}
 	};
 
@@ -583,117 +665,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	func_return_types.push_back(return_type);
 	return func;
 }
-
-// static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptionHandling exception_handling,
-//                                               const ClientProperties &client_properties,
-//                                               FunctionNullHandling null_handling) {
-
-// 	// Through the capture of the lambda, we have access to the function pointer
-// 	// We just need to make sure that it doesn't get garbage collected
-// 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void { // NOLINT
-// 		py::gil_scoped_acquire gil;
-// 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
-
-// 		bool udf_caching = DBConfig::GetConfig(state.GetContext()).options.udf_caching;
-
-// 		// Initialize the cache if it isn't already
-// 		auto &map = state.GetContext().db->GetUDFCache();
-// 		auto it = map.find(static_cast<void *>(function));
-// 		if (it == map.end()) {
-// 			it = map.emplace(static_cast<void *>(function), MakeCache(input, state, result)).first;
-// 		}
-// 		auto &cache = it->second;
-
-// 		// Create state for HT
-// 		SelectionVector misses;
-// 		if (udf_caching) {
-// 			misses.Initialize();
-// 		}
-// 		Vector addresses(LogicalType::POINTER);
-
-// 		// Fetch the groups from the HT
-// 		idx_t miss_count = udf_caching ? cache->FindOrCreateGroups(input, addresses, misses) : input.size();
-
-// 		// Set null for the output vector
-// 		for (idx_t row = 0; row < input.size(); ++row) {
-// 			for (idx_t i = 0; i < input.ColumnCount(); i++) {
-// 				// Fill the tuple with the arguments for this row
-// 				auto &column = input.data[i];
-// 				auto value = column.GetValue(row);
-// 				if (value.IsNull() && default_null_handling) {
-// 					FlatVector::SetNull(result, row, true);
-// 					break;
-// 				}
-// 			}
-// 		}
-
-// 		// Invoke the UDF for each miss
-// 		if (miss_count != 0) {
-// 			for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
-// 				idx_t row = udf_caching ? misses[miss_idx] : miss_idx;
-// 				auto bundled_parameters = py::tuple((int)input.ColumnCount());
-// 				bool contains_null = false;
-// 				for (idx_t i = 0; i < input.ColumnCount(); i++) {
-// 					// Fill the tuple with the arguments for this row
-// 					auto &column = input.data[i];
-// 					auto value = column.GetValue(row);
-// 					if (value.IsNull() && default_null_handling) {
-// 						contains_null = true;
-// 						break;
-// 					}
-// 					bundled_parameters[i] = PythonObject::FromValue(value, column.GetType(), client_properties);
-// 				}
-// 				if (contains_null) {
-// 					// Immediately insert None, no need to call the function
-// 					FlatVector::SetNull(result, row, true);
-// 					continue;
-// 				}
-
-// 				// Call the function
-// 				auto ret = PyObject_CallObject(function, bundled_parameters.ptr());
-// 				if (ret == nullptr && PyErr_Occurred()) {
-// 					if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-// 						auto exception = py::error_already_set();
-// 						throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-// 						                            exception.what());
-// 					} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
-// 						PyErr_Clear();
-// 						FlatVector::SetNull(result, row, true);
-// 						continue;
-// 					} else {
-// 						throw NotImplementedException("Exception handling type not implemented");
-// 					}
-// 				} else if ((!ret || ret == Py_None) && default_null_handling) {
-// 					throw InvalidInputException(NullHandlingError());
-// 				}
-// 				TransformPythonObject(ret, result, row);
-// 			}
-// 		}
-
-// 		if (udf_caching) {
-// 			// Reference the result vector using our DataChunk
-// 			DataChunk payload;
-// 			auto result_type = vector<LogicalType>(1, result.GetType());
-// 			payload.Initialize(Allocator::DefaultAllocator(), result_type);
-// 			payload.SetCardinality(input);
-// 			payload.data[0].Reference(result);
-
-// 			// Load the new values into the cache (if there are any)
-// 			if (miss_count != 0) {
-// 				cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
-// 			}
-
-// 			// Fetch the aggregate result from the cache
-// 			RowOperationsState row_state(cache->GetAggregateAllocatorRef());
-// 			RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
-// 		}
-
-// 		if (input.size() == 1) {
-// 			result.SetVectorType(VectorType::CONSTANT_VECTOR);
-// 		}
-// 	};
-// 	return func;
-// }
 
 namespace {
 
