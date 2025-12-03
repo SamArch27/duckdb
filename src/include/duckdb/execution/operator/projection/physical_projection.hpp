@@ -10,7 +10,6 @@
 
 #include "duckdb/execution/physical_operator.hpp"
 #include "duckdb/planner/expression.hpp"
-#include "duckdb/optimizer/adaptive_udf.hpp"
 
 namespace duckdb {
 

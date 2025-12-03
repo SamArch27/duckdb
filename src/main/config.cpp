@@ -170,7 +170,6 @@ static const ConfigurationOption internal_options[] = {
     DUCKDB_GLOBAL(PythonProcessesSetting),
     DUCKDB_GLOBAL(UDFCachingSetting),
     DUCKDB_GLOBAL(LIPSetting),
-    DUCKDB_GLOBAL(BestUDFPlacementSetting),
     DUCKDB_GLOBAL_ALIAS("worker_threads", ThreadsSetting),
     DUCKDB_GLOBAL(UsernameSetting),
     DUCKDB_GLOBAL_ALIAS("user", UsernameSetting),

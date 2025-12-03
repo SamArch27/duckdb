@@ -155,8 +155,6 @@ struct DBConfigOptions {
 	idx_t maximum_memory = DConstants::INVALID_INDEX;
 	//! The maximum size of the 'temp_directory' folder when set (in bytes). Default: 90% of available disk space.
 	idx_t maximum_swap_space = DConstants::INVALID_INDEX;
-	//! The place in the query plan to evaluate the UDF predicate
-	int64_t best_udf_placement = 0;
 	//! Whether to cache UDF calls
 	bool udf_caching = true;
 	//! Whether to use LIP

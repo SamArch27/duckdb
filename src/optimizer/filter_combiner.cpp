@@ -92,7 +92,6 @@ FilterResult FilterCombiner::AddConstantComparison(vector<ExpressionValueInforma
 FilterResult FilterCombiner::AddFilter(unique_ptr<Expression> expr) {
 	//	LookUpConjunctions(expr.get());
 	// try to push the filter into the combiner
-
 	auto result = AddFilter(*expr);
 	if (result == FilterResult::UNSUPPORTED) {
 		// unsupported filter, push into remaining filters

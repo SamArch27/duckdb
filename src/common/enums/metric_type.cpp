@@ -36,7 +36,6 @@ profiler_settings_t MetricsUtils::GetOptimizerMetrics() {
         MetricsType::OPTIMIZER_REORDER_FILTER,
         MetricsType::OPTIMIZER_SAMPLING_PUSHDOWN,
         MetricsType::OPTIMIZER_JOIN_FILTER_PUSHDOWN,
-        MetricsType::OPTIMIZER_ADAPTIVE_UDF,
         MetricsType::OPTIMIZER_EXTENSION,
         MetricsType::OPTIMIZER_MATERIALIZED_CTE,
         MetricsType::OPTIMIZER_SUM_REWRITER,
@@ -105,8 +104,6 @@ MetricsType MetricsUtils::GetOptimizerMetricByType(OptimizerType type) {
             return MetricsType::OPTIMIZER_SAMPLING_PUSHDOWN;
         case OptimizerType::JOIN_FILTER_PUSHDOWN:
             return MetricsType::OPTIMIZER_JOIN_FILTER_PUSHDOWN;
-        case OptimizerType::ADAPTIVE_UDF:
-            return MetricsType::OPTIMIZER_ADAPTIVE_UDF;
         case OptimizerType::EXTENSION:
             return MetricsType::OPTIMIZER_EXTENSION;
         case OptimizerType::MATERIALIZED_CTE:
@@ -168,8 +165,6 @@ OptimizerType MetricsUtils::GetOptimizerTypeByMetric(MetricsType type) {
             return OptimizerType::SAMPLING_PUSHDOWN;
         case MetricsType::OPTIMIZER_JOIN_FILTER_PUSHDOWN:
             return OptimizerType::JOIN_FILTER_PUSHDOWN;
-        case MetricsType::OPTIMIZER_ADAPTIVE_UDF:
-            return OptimizerType::ADAPTIVE_UDF;
         case MetricsType::OPTIMIZER_EXTENSION:
             return OptimizerType::EXTENSION;
         case MetricsType::OPTIMIZER_MATERIALIZED_CTE:
@@ -208,7 +203,6 @@ bool MetricsUtils::IsOptimizerMetric(MetricsType type) {
         case MetricsType::OPTIMIZER_REORDER_FILTER:
         case MetricsType::OPTIMIZER_SAMPLING_PUSHDOWN:
         case MetricsType::OPTIMIZER_JOIN_FILTER_PUSHDOWN:
-        case MetricsType::OPTIMIZER_ADAPTIVE_UDF:
         case MetricsType::OPTIMIZER_EXTENSION:
         case MetricsType::OPTIMIZER_MATERIALIZED_CTE:
         case MetricsType::OPTIMIZER_SUM_REWRITER:
