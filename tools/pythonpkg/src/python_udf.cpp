@@ -608,7 +608,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			// execute the UDF directly if there are no python processes
 			if (DBConfig::GetConfig(state.GetContext()).options.maximum_python_processes == 0) {
 				if (miss_count != 0) {
-
 					inner_func(sliced_input, sliced_result);
 				}
 			}
@@ -616,7 +615,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			else {
 				auto &scheduler = TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db));
 				if (miss_count != 0) {
-
 					scheduler.ExecuteUDFOnParallelWorkers(sliced_input, function_index, sliced_result);
 				}
 			}
@@ -636,7 +634,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 			// insert the new values into the cache (if there are any)
 			if (miss_count != 0) {
-
 				cache->AddChunk(input, output, AggregateType::NON_DISTINCT);
 			}
 
@@ -644,18 +641,22 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			RowOperationsState row_state(cache->GetAggregateAllocatorRef());
 			RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, output, 0);
 
+			// propagate null mask
+			for (idx_t i = 0; i < input.size(); ++i) {
+				if (FlatVector::IsNull(output.data[0], i)) {
+					FlatVector::SetNull(result, i, true);
+				}
+			}
 		} else {
 
 			// execute the UDF directly if there are no python processes
 			if (DBConfig::GetConfig(state.GetContext()).options.maximum_python_processes == 0) {
-
 				inner_func(input, result);
 
 			}
 			// otherwise parallelize over the worker processes
 			else {
 				auto &scheduler = TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db));
-
 				scheduler.ExecuteUDFOnParallelWorkers(input, function_index, result);
 			}
 		}
