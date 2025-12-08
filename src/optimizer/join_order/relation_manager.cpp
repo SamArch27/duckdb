@@ -361,8 +361,19 @@ bool RelationManager::ExtractJoinRelations(JoinOrderOptimizer &optimizer, Logica
 		// table scan, apply another selectivity.
 		get.SetEstimatedCardinality(stats.cardinality);
 		if (!datasource_filters.empty()) {
-			stats.cardinality =
-			    (idx_t)MaxValue(double(stats.cardinality) * RelationStatisticsHelper::DEFAULT_SELECTIVITY, (double)1);
+			bool contains_only_udfs = true;
+			for (auto &f : datasource_filters) {
+				for (auto &expr : f.get().expressions) {
+					if (!expr->ContainsUDF()) {
+						contains_only_udfs = false;
+					}
+				}
+			}
+
+			if (!contains_only_udfs) {
+				stats.cardinality = (idx_t)MaxValue(
+				    double(stats.cardinality) * RelationStatisticsHelper::DEFAULT_SELECTIVITY, (double)1);
+			}
 		}
 		ModifyStatsIfLimit(limit_op.get(), stats);
 		AddRelation(input_op, parent, stats);
