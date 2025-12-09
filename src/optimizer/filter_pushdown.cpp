@@ -222,20 +222,40 @@ unique_ptr<LogicalOperator> FilterPushdown::AddLogicalFilter(unique_ptr<LogicalO
 		// No left expressions, so needn't to add an extra filter operator.
 		return op;
 	}
-	auto filter = make_uniq<LogicalFilter>();
+
+	// separate UDF and other expressions
+	vector<unique_ptr<Expression>> udf_expressions;
+	vector<unique_ptr<Expression>> other_expressions;
+	for (auto &expr : expressions) {
+		if (expr->ContainsUDF()) {
+			udf_expressions.push_back(std::move(expr));
+		} else {
+			other_expressions.push_back(std::move(expr));
+		}
+	}
+
+	// create a filter with non-UDF expressions
+	auto filter_op = make_uniq<LogicalFilter>();
+	auto *filter = filter_op.get();
 	if (op->has_estimated_cardinality) {
-		// set the filter's estimated cardinality as the child op's.
-		// if the filter is created during the filter pushdown optimization, the estimated cardinality will be later
-		// overridden during the join order optimization to a more accurate one.
-		// if the filter is created during the statistics propagation, the estimated cardinality won't be set unless set
-		// here. assuming the filters introduced during the statistics propagation have little effect in reducing the
-		// cardinality, we adopt the the cardinality of the child. this could be improved by MinMax info from the
-		// statistics propagation
 		filter->SetEstimatedCardinality(op->estimated_cardinality);
 	}
-	filter->expressions = std::move(expressions);
+	filter->expressions = std::move(other_expressions);
 	filter->children.push_back(std::move(op));
-	return std::move(filter);
+
+	// now for each UDF filter, attach it above the regular filter
+	for (auto &expr : udf_expressions) {
+		auto new_filter = make_uniq<LogicalFilter>();
+		if (filter->has_estimated_cardinality) {
+			new_filter->SetEstimatedCardinality(filter->estimated_cardinality);
+		}
+		new_filter->expressions.push_back(std::move(expr));
+		new_filter->children.emplace_back(filter);
+		filter = new_filter.release();
+	}
+
+	filter_op.release();
+	return unique_ptr<LogicalOperator>(filter);
 }
 
 unique_ptr<LogicalOperator> FilterPushdown::PushFinalFilters(unique_ptr<LogicalOperator> op) {
