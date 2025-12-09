@@ -47,22 +47,6 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownProjection(unique_ptr<Logica
 	D_ASSERT(op->type == LogicalOperatorType::LOGICAL_PROJECTION);
 	auto &proj = op->Cast<LogicalProjection>();
 
-	// for every projection containing a UDF, create a UDF to push down
-	for (auto &expr : proj.expressions) {
-		if (expr->ContainsUDF()) {
-			// construct TRUE OR udf(...) IS NULL
-			auto lhs = make_uniq<BoundConstantExpression>(Value::BOOLEAN(true));
-			auto rhs = make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NULL, LogicalType::BOOLEAN);
-			rhs->children.push_back(expr->Copy());
-			auto udf_filter =
-			    make_uniq<BoundConjunctionExpression>(ExpressionType::CONJUNCTION_OR, std::move(lhs), std::move(rhs));
-
-			// push it down in the query plan
-			combiner.AddFilter(std::move(udf_filter));
-		}
-	}
-	GenerateFilters();
-
 	// push filter through logical projection
 	// all the BoundColumnRefExpressions in the filter should refer to the LogicalProjection
 	// we can rewrite them by replacing those references with the expression of the LogicalProjection node
@@ -74,9 +58,6 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownProjection(unique_ptr<Logica
 		auto &f = *filter;
 		D_ASSERT(f.bindings.size() <= 1);
 		bool is_volatile = IsVolatile(proj, f.filter);
-
-		if (f.filter->ContainsUDF()) {
-		}
 
 		if (is_volatile || f.filter->CanThrow()) {
 			// We can't push down related expressions if the column in the
@@ -92,6 +73,19 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownProjection(unique_ptr<Logica
 			}
 		}
 	}
+
+	// for every projection containing a UDF, create a UDF to push down
+	for (auto &expr : proj.expressions) {
+		if (expr->ContainsUDF()) {
+			// construct udf(...) IS NOT NULL predicate
+			auto udf_filter =
+			    make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NOT_NULL, LogicalType::BOOLEAN);
+			udf_filter->children.push_back(expr->Copy());
+			// push it down in the query
+			child_pushdown.AddFilter(std::move(udf_filter));
+		}
+	}
+
 	child_pushdown.GenerateFilters();
 	// now push into children
 	op->children[0] = child_pushdown.Rewrite(std::move(op->children[0]));
