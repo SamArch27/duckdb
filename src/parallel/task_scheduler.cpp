@@ -25,8 +25,7 @@
 #endif
 #include <algorithm>
 #include "duckdb/common/serializer/memory_stream.hpp"
-#include "duckdb/common/serializer/binary_serializer.hpp"
-#include "duckdb/common/serializer/binary_deserializer.hpp"
+#include "duckdb/execution/aggregate_hashtable.hpp"
 #include <sys/mman.h>
 
 #include <iostream>
@@ -572,6 +571,11 @@ void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk) {
 	// ensure that its flattened before serialization
 	chunk.Flatten();
 
+	// write out the length
+	idx_t old_pos = stream.GetPosition();
+	idx_t length = 0;
+	stream.Write(length);
+
 	// write the total count
 	idx_t total_count = chunk.size();
 	stream.Write(total_count);
@@ -614,12 +618,21 @@ void TaskScheduler::SerializeDataChunk(MemoryStream &stream, DataChunk &chunk) {
 		// reset the cursor
 		stream.SetPosition(new_pos);
 	}
+
+	// finally go back and update the length offset
+	idx_t new_pos = stream.GetPosition();
+	stream.SetPosition(old_pos);
+	length = new_pos - old_pos;
+	stream.Write(length);
+	stream.SetPosition(new_pos);
 }
 
-void TaskScheduler::DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk) {
+idx_t TaskScheduler::DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk) {
 
-	// read the count
+	// read out the length
+	idx_t length = stream.Read<idx_t>();
 
+	// read the row count
 	idx_t total_count = stream.Read<idx_t>();
 
 	// number of columns
@@ -642,12 +655,12 @@ void TaskScheduler::DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk)
 
 	// set the validity mask for each vector
 	for (idx_t i = 0; i < columns; ++i) {
-		// advance the cursor to the offset of the validity mask
 
+		// advance the cursor to the offset of the validity mask
 		stream.SetPosition(offsets[i]);
+
 		// read the validity mask
 		chunk.data[i].validity.Read(stream, total_count);
-
 		idx_t data_offset = stream.GetPosition();
 
 		// zero copy the data into the vector
@@ -656,6 +669,116 @@ void TaskScheduler::DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk)
 
 	// assign the sliced number of rows
 	chunk.count = total_count;
+
+	return length;
+}
+
+void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
+	vector<LogicalType> return_type = {db.func_return_types[function_index]};
+	vector<LogicalType> input_types = db.scalar_funcs[function_index].arguments;
+	idx_t num_procs = processes.size();
+
+	// serialize input
+	auto input_stream = MemoryStream(static_cast<data_ptr_t>(input_buffer), SHM_BUFFER_SIZE);
+
+	// for each entry in the cache, serialize to shared memory
+	auto &cache = db.udf_caches[function_index];
+	AggregateHTScanState ht_scan_state;
+	cache->InitializeScan(ht_scan_state);
+
+	// create data chunks to store the current vector from the scan
+	DataChunk distinct_rows;
+	DataChunk payload_rows;
+	distinct_rows.Initialize(Allocator::DefaultAllocator(), input_types);
+	payload_rows.Initialize(Allocator::DefaultAllocator(), return_type);
+
+	// Serialize the entire input from the cache into shared memory
+	idx_t chunk_count = 0;
+	while (cache->Scan(ht_scan_state, distinct_rows, payload_rows)) {
+		++chunk_count;
+		SerializeDataChunk(input_stream, distinct_rows);
+	}
+
+	// Wake up all of the worker processes to execute the UDF in parallel
+	for (idx_t i = 0; i < num_procs; ++i) {
+		auto &proc = processes[i];
+		auto *block = proc.shared_block;
+
+		// signal the worker to process it
+		block->chunk_count = chunk_count;
+		block->function_index = function_index;
+		block->futex_cmd.store(1, std::memory_order_release);
+		futex_wake(&block->futex_cmd);
+	}
+
+	// wait until all processes have completed
+	for (idx_t i = 0; i < num_procs; ++i) {
+		auto &proc = processes[i];
+		auto *block = proc.shared_block;
+		while (block->futex_done.load(std::memory_order_acquire) != 1) {
+			futex_wait(&block->futex_done, 0);
+		}
+	}
+
+	// create an output stream for each worker
+	vector<MemoryStream> output_streams;
+	for (idx_t i = 0; i < num_procs; ++i) {
+		auto &proc = processes[i];
+		auto *block = proc.shared_block;
+		output_streams.push_back(MemoryStream(static_cast<data_ptr_t>(block->output_buffer), SHM_BUFFER_SIZE));
+	}
+
+	// for each chunk
+	for (idx_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx) {
+		DataChunk result;
+		result.Initialize(Allocator::DefaultAllocator(), return_type);
+
+		// combine the partial results from each process
+		for (idx_t i = 0; i < num_procs; ++i) {
+
+			// save the cursor position so it can be updated correctly later
+			auto &output_stream = output_streams[i];
+			idx_t old_pos = output_stream.GetPosition();
+
+			// read out the partial result
+			DataChunk output;
+			idx_t length = DeserializeDataChunk(output_stream, output);
+			output_stream.SetPosition(old_pos + length);
+
+			std::string message = "Parent read output data chunk from child!";
+			for (idx_t i = 0; i < output.size(); ++i) {
+				message += output.GetValue(0, i).ToString();
+				message += " ";
+			}
+			std::cout << message << std::endl;
+
+			// compute range for that process
+			idx_t start_row = i * output.size() / num_procs;
+			idx_t end_row = (i == num_procs - 1) ? output.size() : (i + 1) * output.size() / num_procs;
+			idx_t sliced_count = end_row - start_row;
+
+			// now copy the partial result from this process into the final result
+			VectorOperations::Copy(output.data[0], result.data[0], sliced_count, 0, start_row);
+		}
+
+		std::string message = "Combined partial results from child processes!";
+		for (idx_t i = 0; i < result.size(); ++i) {
+			message += result.GetValue(0, i).ToString();
+			message += " ";
+		}
+		std::cout << message << std::endl;
+		std::cout << std::endl;
+	}
+
+	// reset the futex for each worker
+	for (idx_t i = 0; i < num_procs; ++i) {
+		auto &proc = processes[i];
+		auto *block = proc.shared_block;
+		block->futex_done.store(0, std::memory_order_release);
+	}
+
+	// TODO:
+	// 1. Insert the result chunks into the cache for subsequent lookups
 }
 
 void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result) {
@@ -671,6 +794,7 @@ void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function
 		auto *block = proc.shared_block;
 
 		// signal the worker to process it
+		block->chunk_count = 1;
 		block->function_index = function_index;
 		block->futex_cmd.store(1, std::memory_order_release);
 		futex_wake(&block->futex_cmd);
@@ -720,33 +844,56 @@ void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd, idx_t
 			_exit(0);
 		}
 
-		// read the partial input chunk
+		// set up input/output shared memory streams
 		auto input_stream = MemoryStream(static_cast<data_ptr_t>(block->input_buffer), SHM_BUFFER_SIZE);
-
-		// first read the count
-		DataChunk input;
-		DeserializeDataChunk(input_stream, input);
-
-		// slice the data chunk to the correct range
-		auto num_procs = processes.size();
-		idx_t start_row = worker_index * input.size() / num_procs;
-		idx_t end_row = (worker_index == num_procs - 1) ? input.size() : (worker_index + 1) * input.size() / num_procs;
-		idx_t sliced_count = end_row - start_row;
-		input.Slice(start_row, sliced_count);
-
-		// now create a new DataChunk which will hold the result
-		DataChunk output;
-		output.SetCardinality(input.size());
-		vector<LogicalType> output_type(1, db.func_return_types[block->function_index]);
-		output.Initialize(allocator, output_type);
-
-		// call the UDF
-		inner_scalar_function_t &func = db.inner_funcs[block->function_index];
-		func(input, output.data[0]);
-
-		// now serialize the output DataChunk
 		auto output_stream = MemoryStream(static_cast<data_ptr_t>(block->output_buffer), SHM_BUFFER_SIZE);
-		SerializeDataChunk(output_stream, output);
+
+		for (idx_t chunk_idx = 0; chunk_idx < block->chunk_count; ++chunk_idx) {
+
+			// save the old cursor position so we can update it later
+			idx_t old_pos = input_stream.GetPosition();
+
+			// deserialize the input chunk
+			DataChunk input;
+			idx_t length = DeserializeDataChunk(input_stream, input);
+			input_stream.SetPosition(old_pos + length);
+
+			std::string message = "";
+			message += "Child read data chunk!";
+			for (idx_t i = 0; i < input.size(); ++i) {
+				message += input.GetValue(0, i).ToString();
+				message += " ";
+			}
+			std::cout << message << std::endl;
+
+			// slice the data chunk to the correct range
+			auto num_procs = processes.size();
+			idx_t start_row = worker_index * input.size() / num_procs;
+			idx_t end_row =
+			    (worker_index == num_procs - 1) ? input.size() : (worker_index + 1) * input.size() / num_procs;
+			idx_t sliced_count = end_row - start_row;
+			input.Slice(start_row, sliced_count);
+
+			// now create a new DataChunk which will hold the result
+			DataChunk output;
+			output.SetCardinality(input.size());
+			vector<LogicalType> output_type(1, db.func_return_types[block->function_index]);
+			output.Initialize(allocator, output_type);
+
+			// call the UDF
+			inner_scalar_function_t &func = db.inner_funcs[block->function_index];
+			func(input, output.data[0]);
+
+			message = "Child writing output of UDF!\n";
+			for (idx_t i = 0; i < output.size(); ++i) {
+				message += output.GetValue(0, i).ToString();
+				message += " ";
+			}
+			std::cout << message << std::endl;
+
+			// now serialize the output DataChunk
+			SerializeDataChunk(output_stream, output);
+		}
 
 		// reset futex and wake parent
 		block->futex_cmd.store(0, std::memory_order_release);

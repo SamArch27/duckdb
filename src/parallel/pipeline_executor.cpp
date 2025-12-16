@@ -402,11 +402,13 @@ PipelineExecuteResult PipelineExecutor::PushFinalize() {
 	auto &scalar_funcs = db.scalar_funcs;
 	auto &udf_strategies = db.udf_strategies;
 	auto &udf_caches = db.udf_caches;
+	auto &scheduler = TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db));
+
 	for (idx_t i = 0; i < scalar_funcs.size(); ++i) {
 		// if the strategy is to materialize
 		if (udf_strategies[i] == UDFStrategy::MATERIALIZE) {
 			if (udf_caches[i] != nullptr) {
-				// BATCH APPLY!
+				scheduler.BatchExecuteUDFOnParallelWorkers(i);
 				udf_strategies[i] = UDFStrategy::LOOKUP;
 			}
 		}

@@ -57,10 +57,10 @@ class TaskScheduler {
 	constexpr static idx_t EXIT_FUNCTION_INDEX = DConstants::INVALID_INDEX;
 
 	struct SharedWorkerBlock {
-		alignas(64) atomic<int> futex_cmd;  // parent -> worker (command signal)
-		alignas(64) atomic<int> futex_done; // worker -> parent (completion signal)
-		alignas(64) idx_t function_index;
-
+		alignas(64) atomic<int> futex_cmd;                 // parent -> worker (command signal)
+		alignas(64) atomic<int> futex_done;                // worker -> parent (completion signal)
+		alignas(64) idx_t function_index;                  // which UDF to call
+		alignas(64) idx_t chunk_count;                     // number of chunks
 		alignas(64) data_ptr_t input_buffer;               // parent writes, worker reads
 		alignas(64) data_t output_buffer[SHM_BUFFER_SIZE]; // worker writes, parent reads
 	};
@@ -124,13 +124,14 @@ public:
 	//! Result do not need to be exact 'return 0' is a valid fallback strategy
 	static idx_t GetEstimatedCPUId();
 
+	void BatchExecuteUDFOnParallelWorkers(idx_t function_index);
 	void ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result);
 	void RunWorkerProcess(SharedWorkerBlock *block, int shm_fd, idx_t worker_index);
 
 private:
 	void SerializeVector(MemoryStream &stream, Vector &vec, LogicalTypeId type, idx_t count);
 	void SerializeDataChunk(MemoryStream &stream, DataChunk &chunk);
-	void DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk);
+	idx_t DeserializeDataChunk(MemoryStream &stream, DataChunk &chunk);
 
 	void RelaunchThreadsInternal(int32_t n);
 	void RelaunchProcessesInternal(int32_t n);
