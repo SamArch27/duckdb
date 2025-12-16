@@ -728,6 +728,9 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 		output_streams.push_back(MemoryStream(static_cast<data_ptr_t>(block->output_buffer), SHM_BUFFER_SIZE));
 	}
 
+	// reset the input stream
+	input_stream.Rewind();
+
 	// for each chunk
 	for (idx_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx) {
 		DataChunk result;
@@ -745,13 +748,6 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 			idx_t length = DeserializeDataChunk(output_stream, output);
 			output_stream.SetPosition(old_pos + length);
 
-			std::string message = "Parent read output data chunk from child!";
-			for (idx_t i = 0; i < output.size(); ++i) {
-				message += output.GetValue(0, i).ToString();
-				message += " ";
-			}
-			std::cout << message << std::endl;
-
 			// compute range for that process
 			idx_t start_row = i * output.size() / num_procs;
 			idx_t end_row = (i == num_procs - 1) ? output.size() : (i + 1) * output.size() / num_procs;
@@ -761,13 +757,14 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 			VectorOperations::Copy(output.data[0], result.data[0], sliced_count, 0, start_row);
 		}
 
-		std::string message = "Combined partial results from child processes!";
-		for (idx_t i = 0; i < result.size(); ++i) {
-			message += result.GetValue(0, i).ToString();
-			message += " ";
-		}
-		std::cout << message << std::endl;
-		std::cout << std::endl;
+		// Deserialize the next input from our own stream
+		DataChunk input;
+		idx_t old_pos = input_stream.GetPosition();
+		idx_t length = DeserializeDataChunk(input_stream, input);
+		input_stream.SetPosition(old_pos + length);
+
+		// Add the new chunk (with the result this time!) into the cache
+		cache->AddChunk(input, result, AggregateType::NON_DISTINCT);
 	}
 
 	// reset the futex for each worker
@@ -776,9 +773,6 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 		auto *block = proc.shared_block;
 		block->futex_done.store(0, std::memory_order_release);
 	}
-
-	// TODO:
-	// 1. Insert the result chunks into the cache for subsequent lookups
 }
 
 void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result) {
@@ -858,14 +852,6 @@ void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd, idx_t
 			idx_t length = DeserializeDataChunk(input_stream, input);
 			input_stream.SetPosition(old_pos + length);
 
-			std::string message = "";
-			message += "Child read data chunk!";
-			for (idx_t i = 0; i < input.size(); ++i) {
-				message += input.GetValue(0, i).ToString();
-				message += " ";
-			}
-			std::cout << message << std::endl;
-
 			// slice the data chunk to the correct range
 			auto num_procs = processes.size();
 			idx_t start_row = worker_index * input.size() / num_procs;
@@ -883,13 +869,6 @@ void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd, idx_t
 			// call the UDF
 			inner_scalar_function_t &func = db.inner_funcs[block->function_index];
 			func(input, output.data[0]);
-
-			message = "Child writing output of UDF!\n";
-			for (idx_t i = 0; i < output.size(); ++i) {
-				message += output.GetValue(0, i).ToString();
-				message += " ";
-			}
-			std::cout << message << std::endl;
 
 			// now serialize the output DataChunk
 			SerializeDataChunk(output_stream, output);
