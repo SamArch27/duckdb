@@ -191,198 +191,6 @@ static unique_ptr<GroupedAggregateHashTable> MakeCache(DataChunk &input, Express
 	                                            input_types, output_types, aggregates);
 }
 
-static scalar_function_t CreateNumpyFunction(PyObject *function, PythonExceptionHandling exception_handling,
-                                             const ClientProperties &client_properties,
-                                             FunctionNullHandling null_handling) {
-	// Through the capture of the lambda, we have access to the function pointer
-	// We just need to make sure that it doesn't get garbage collected
-	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
-		py::gil_scoped_acquire gil;
-
-		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
-
-		bool udf_caching = DBConfig::GetConfig(state.GetContext()).options.udf_caching;
-
-		// owning references
-		py::object python_object;
-
-		auto &context = state.GetContext();
-		auto options = context.GetClientProperties();
-
-		auto result_validity = FlatVector::Validity(result);
-		SelectionVector selvec(input.size());
-		idx_t input_size = input.size();
-		if (default_null_handling) {
-			vector<UnifiedVectorFormat> vec_data(input.ColumnCount());
-			for (idx_t i = 0; i < input.ColumnCount(); i++) {
-				input.data[i].ToUnifiedFormat(input.size(), vec_data[i]);
-			}
-
-			idx_t index = 0;
-			for (idx_t i = 0; i < input.size(); i++) {
-				bool any_null = false;
-				for (idx_t col_idx = 0; col_idx < input.ColumnCount(); col_idx++) {
-					auto &vec = vec_data[col_idx];
-					if (!vec.validity.RowIsValid(vec.sel->get_index(i))) {
-						any_null = true;
-						break;
-					}
-				}
-				if (any_null) {
-					result_validity.SetInvalid(i);
-					continue;
-				}
-				selvec.set_index(index++, i);
-			}
-			if (index != input.size()) {
-				input.Slice(selvec, index);
-			}
-		}
-
-		// Initialize the cache if it isn't already
-		auto &map = state.GetContext().db->GetUDFCache();
-		auto it = map.find(static_cast<void *>(function));
-		if (it == map.end()) {
-			it = map.emplace(static_cast<void *>(function), MakeCache(input, state, result)).first;
-		}
-		auto &cache = it->second;
-
-		// Create state for HT
-		SelectionVector misses;
-		if (udf_caching) {
-			misses.Initialize();
-		}
-		Vector addresses(LogicalType::POINTER);
-
-		// Fetch the groups from the HT
-		idx_t miss_count = udf_caching ? cache->FindOrCreateGroups(input, addresses, misses) : input.size();
-
-		// Create input tuple args to the vectorized UDF
-		auto count = input.size();
-		bool exception_occurred = false;
-
-		if (miss_count != 0) {
-			auto input_args = py::tuple(input.ColumnCount());
-			for (idx_t i = 0; i < input.ColumnCount(); ++i) {
-				// Create an array for this column
-				py::array_t<py::object> arr(miss_count);
-				auto buf = arr.mutable_unchecked<1>();
-				auto &column = input.data[i];
-
-				// Populate the array with the column value for each row for the input
-				for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
-					idx_t row = udf_caching ? misses[miss_idx] : miss_idx;
-					auto value = column.GetValue(row);
-					buf[miss_idx] = PythonObject::FromValue(value, column.GetType(), client_properties);
-				}
-				input_args[i] = arr;
-			}
-
-			// Call the function
-			auto ret = PyObject_CallObject(function, input_args.ptr());
-			if (ret == nullptr && PyErr_Occurred()) {
-				exception_occurred = true;
-				if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-					auto exception = py::error_already_set();
-					throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-					                            exception.what());
-				} else {
-					throw NotImplementedException("Exception handling type not implemented");
-				}
-			} else {
-				python_object = py::reinterpret_steal<py::object>(ret);
-			}
-
-			// Cast the result to an array of Python objects
-			if (!py::isinstance<py::array_t<py::object>>(python_object)) {
-				throw InvalidInputException("Could not convert the result into a numpy array of Python objects");
-			}
-		}
-
-		// Convert the array back to DuckDB's vector format
-		auto ConvertArrayToVector = [&](Vector &result) {
-			if (miss_count != 0) {
-				auto output_array = static_cast<py::array_t<py::object>>(python_object).unchecked<1>();
-				for (idx_t miss_idx = 0; miss_idx < miss_count; ++miss_idx) {
-					idx_t row = udf_caching ? misses[miss_idx] : miss_idx;
-					auto ret = output_array[miss_idx].ptr();
-					if (ret == nullptr && PyErr_Occurred()) {
-						if (exception_handling == PythonExceptionHandling::FORWARD_ERROR) {
-							auto exception = py::error_already_set();
-							throw InvalidInputException("Python exception occurred while executing the UDF: %s",
-							                            exception.what());
-						} else if (exception_handling == PythonExceptionHandling::RETURN_NULL) {
-							PyErr_Clear();
-							FlatVector::SetNull(result, row, true);
-							continue;
-						} else {
-							throw NotImplementedException("Exception handling type not implemented");
-						}
-					} else if ((!ret || ret == Py_None) && default_null_handling) {
-						throw InvalidInputException(NullHandlingError());
-					}
-					TransformPythonObject(ret, result, row);
-					if (default_null_handling && !exception_occurred) {
-						VerifyVectorizedNullHandling(result, count);
-					}
-				}
-			}
-
-			if (udf_caching) {
-				// Reference the result vector using our DataChunk
-				DataChunk payload;
-				auto result_type = vector<LogicalType>(1, result.GetType());
-				payload.Initialize(Allocator::DefaultAllocator(), result_type);
-				payload.SetCardinality(input);
-				payload.data[0].Reference(result);
-
-				// Load the new values into the cache (if there are any)
-				if (miss_count != 0) {
-					cache->AddChunk(input, payload, AggregateType::NON_DISTINCT);
-				}
-
-				// Fetch the aggregate result from the cache
-				RowOperationsState row_state(cache->GetAggregateAllocatorRef());
-				RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, payload, 0);
-			}
-		};
-
-		if (count == input_size) {
-			ConvertArrayToVector(result);
-		} else {
-			D_ASSERT(default_null_handling);
-			Vector temp(result.GetType(), count);
-			ConvertArrayToVector(temp);
-
-			if (count) {
-				SelectionVector inverted(input_size);
-				// Create a SelVec that inverts the filtering
-				// example: count: 6, null_indices: 1,3
-				// input selvec: [0, 2, 4, 5]
-				// inverted selvec: [0, 0, 1, 1, 2, 3]
-				idx_t src_index = 0;
-				for (idx_t i = 0; i < input_size; i++) {
-					// Fill the gaps with the previous index
-					inverted.set_index(i, src_index);
-					if (src_index + 1 < count && selvec.get_index(src_index) == i) {
-						src_index++;
-					}
-				}
-				VectorOperations::Copy(temp, result, inverted, count, 0, 0, input_size);
-			}
-			for (idx_t i = 0; i < input_size; i++) {
-				FlatVector::SetNull(result, i, !result_validity.RowIsValid(i));
-			}
-			result.Verify(input_size);
-		}
-
-		if (input_size == 1) {
-			result.SetVectorType(VectorType::CONSTANT_VECTOR);
-		}
-	};
-	return func;
-}
-
 static scalar_function_t CreateArrowFunction(PyObject *function, PythonExceptionHandling exception_handling,
                                              FunctionNullHandling null_handling) {
 	// Through the capture of the lambda, we have access to the function pointer
@@ -566,11 +374,21 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	auto &inner_funcs = db.inner_funcs;
 	auto &udf_strategies = db.udf_strategies;
 	auto &func_return_types = db.func_return_types;
+	auto &udf_caches = db.udf_caches;
 	idx_t function_index = inner_funcs.size();
 
-	scalar_function_t func = [=, &db](DataChunk &input, ExpressionState &state, Vector &result) -> void {
+	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
+		// get the database instance
+		auto &db = *state.GetContext().db;
+
+		// ensure that the flag is set correctly for the UDF
+		auto udf_strategy = db.udf_strategies[function_index];
+		D_ASSERT(udf_strategy != UDFStrategy::UNDECIDED);
+
+		auto &db_config = DBConfig::GetConfig(state.GetContext());
+
 		// lookup UDF caching flag
-		bool udf_caching = DBConfig::GetConfig(state.GetContext()).options.udf_caching;
+		bool udf_caching = db_config.options.udf_caching;
 
 		// check for udf caching
 		if (udf_caching) {
@@ -587,17 +405,25 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			misses.Initialize();
 
 			// check if the UDF cache has been created
-			auto &map = state.GetContext().db->GetUDFCache();
-			auto it = map.find(static_cast<void *>(function));
+			auto &udf_cache = db.udf_caches[function_index];
 
 			// create it if it hasn't been created yet
-			if (it == map.end()) {
-				it = map.emplace(static_cast<void *>(function), MakeCache(input, state, result)).first;
+			if (udf_cache == nullptr) {
+				udf_cache = MakeCache(input, state, result);
 			}
-			auto &cache = it->second;
+			auto &cache = udf_cache;
 
 			// lookup the DataChunk in the cache and see which indexes are misses
 			idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
+
+			// if we are materializing then skip the actual UDF call
+			if (udf_strategy == UDFStrategy::MATERIALIZE) {
+				// directly set the output to NOT NULl and return
+				for (idx_t i = 0; i < input.size(); ++i) {
+					FlatVector::SetNull(result, i, false);
+				}
+				return;
+			}
 
 			// create a vector to store the result
 			Vector sliced_result(result.GetType());
@@ -607,11 +433,12 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			sliced_input.Slice(misses, miss_count);
 
 			// execute the UDF directly if there are no python processes
-			if (DBConfig::GetConfig(state.GetContext()).options.maximum_python_processes == 0) {
+			if (db_config.options.maximum_python_processes == 0) {
 				if (miss_count != 0) {
 					inner_func(sliced_input, sliced_result);
 				}
 			}
+
 			// otherwise parallelize over the worker processes
 			else {
 				auto &scheduler = TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db));
@@ -651,7 +478,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		} else {
 
 			// execute the UDF directly if there are no python processes
-			if (DBConfig::GetConfig(state.GetContext()).options.maximum_python_processes == 0) {
+			if (db_config.options.maximum_python_processes == 0) {
 				inner_func(input, result);
 			}
 			// otherwise parallelize over the worker processes
@@ -665,6 +492,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	inner_funcs.push_back(inner_func);
 	func_return_types.push_back(return_type);
 	udf_strategies.push_back(UDFStrategy::UNDECIDED);
+	udf_caches.push_back(nullptr);
 	return func;
 }
 
@@ -804,9 +632,6 @@ public:
 			break;
 		case PythonUDFType::ARROW:
 			func = CreateArrowFunction(udf.ptr(), exception_handling, null_handling);
-			break;
-		case PythonUDFType::NUMPY:
-			func = CreateNumpyFunction(udf.ptr(), exception_handling, client_properties, null_handling);
 			break;
 		}
 

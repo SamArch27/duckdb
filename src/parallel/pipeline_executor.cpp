@@ -1,6 +1,7 @@
 #include "duckdb/parallel/pipeline_executor.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/database.hpp"
 
 #ifdef DUCKDB_DEBUG_ASYNC_SINK_SOURCE
 #include <chrono>
@@ -397,7 +398,19 @@ PipelineExecuteResult PipelineExecutor::PushFinalize() {
 		intermediate_states[i]->Finalize(pipeline.operators[i].get(), context);
 	}
 
-	// TODO: Batch apply all of the UDF inputs buffered by this pipeline
+	auto &db = DatabaseInstance::GetDatabase(pipeline.GetClientContext());
+	auto &scalar_funcs = db.scalar_funcs;
+	auto &udf_strategies = db.udf_strategies;
+	auto &udf_caches = db.udf_caches;
+	for (idx_t i = 0; i < scalar_funcs.size(); ++i) {
+		// if the strategy is to materialize
+		if (udf_strategies[i] == UDFStrategy::MATERIALIZE) {
+			if (udf_caches[i] != nullptr) {
+				// BATCH APPLY!
+				udf_strategies[i] = UDFStrategy::LOOKUP;
+			}
+		}
+	}
 
 	pipeline.executor.Flush(thread);
 	local_sink_state.reset();

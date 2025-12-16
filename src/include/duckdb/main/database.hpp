@@ -61,10 +61,9 @@ public:
 	vector<ScalarFunction> scalar_funcs;
 	vector<LogicalType> func_return_types;
 	vector<UDFStrategy> udf_strategies;
-	unordered_map<void *, unique_ptr<GroupedAggregateHashTable>> udf_cache;
+	vector<unique_ptr<GroupedAggregateHashTable>> udf_caches;
 
 public:
-	unordered_map<void *, unique_ptr<GroupedAggregateHashTable>> &GetUDFCache();
 	BufferPool &GetBufferPool() const;
 	DUCKDB_API SecretManager &GetSecretManager();
 	DUCKDB_API BufferManager &GetBufferManager();
