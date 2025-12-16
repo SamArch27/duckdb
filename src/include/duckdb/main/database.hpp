@@ -42,6 +42,13 @@ struct ExtensionInfo {
 	unique_ptr<ExtensionLoadedInfo> load_info;
 };
 
+enum class UDFStrategy {
+	UNDECIDED,   // default of unsure before the query plan is analyzed
+	STREAM,      // stream the UDF in O(M) batches if no materialization points exist in the plan
+	MATERIALIZE, // materialize the entire UDF input for batch application at the materialization point
+	LOOKUP       // lookup the UDF results after batch application is completed
+};
+
 class DatabaseInstance : public enable_shared_from_this<DatabaseInstance> {
 	friend class DuckDB;
 
@@ -50,8 +57,10 @@ public:
 	DUCKDB_API ~DatabaseInstance();
 
 	DBConfig config;
-	vector<inner_scalar_function_t> funcs;
+	vector<inner_scalar_function_t> inner_funcs;
+	vector<ScalarFunction> scalar_funcs;
 	vector<LogicalType> func_return_types;
+	vector<UDFStrategy> udf_strategies;
 	unordered_map<void *, unique_ptr<GroupedAggregateHashTable>> udf_cache;
 
 public:

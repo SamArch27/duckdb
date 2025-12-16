@@ -1,13 +1,18 @@
 #include "duckdb/parallel/pipeline.hpp"
-
+#include "duckdb/planner/expression/bound_operator_expression.hpp"
 #include "duckdb/common/algorithm.hpp"
 #include "duckdb/common/printer.hpp"
 #include "duckdb/common/tree_renderer/text_tree_renderer.hpp"
+#include "duckdb/common/unordered_set.hpp"
 #include "duckdb/execution/executor.hpp"
 #include "duckdb/execution/operator/join/physical_hash_join.hpp"
 #include "duckdb/execution/operator/aggregate/physical_ungrouped_aggregate.hpp"
 #include "duckdb/execution/operator/scan/physical_table_scan.hpp"
+#include "duckdb/execution/operator/filter/physical_filter.hpp"
+#include "duckdb/execution/operator/projection/physical_projection.hpp"
 #include "duckdb/execution/operator/set/physical_recursive_cte.hpp"
+#include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/main/client_context.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parallel/pipeline_event.hpp"
@@ -245,8 +250,69 @@ void Pipeline::Ready() {
 	ready = true;
 	std::reverse(operators.begin(), operators.end());
 
+	auto &db = DatabaseInstance::GetDatabase(GetClientContext());
+	auto &scalar_funcs = db.scalar_funcs;
+	auto &udf_strategies = db.udf_strategies;
+
+	unordered_set<idx_t> projection_udf_indexes;
+	unordered_set<idx_t> filter_udf_indexes;
+
+	auto GetUDFIndexes = [&](const unique_ptr<Expression> &expr) -> unordered_set<idx_t> {
+		unordered_set<idx_t> udf_indexes;
+		// if the expression contains a UDF
+		if (expr->ContainsUDF()) {
+			unique_ptr<Expression> expr_wrapper(expr.get());
+			// enumerate all UDFs in the expression
+			ExpressionIterator::EnumerateExpression(expr_wrapper, [&](Expression &child) {
+				if (child.GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
+					auto &bound_func = child.Cast<BoundFunctionExpression>();
+					// lookup the UDF index and save it
+					if (bound_func.function.IsUDF()) {
+						auto scalar_func = bound_func.function;
+						auto it = std::find(scalar_funcs.begin(), scalar_funcs.end(), scalar_func);
+						D_ASSERT(it != scalar_funcs.end());
+						auto idx = std::distance(scalar_funcs.begin(), it);
+						udf_indexes.insert(idx);
+					}
+				}
+			});
+			expr_wrapper.release();
+		}
+		return udf_indexes;
+	};
+
+	// TODO: Make sure that the filter is actually a dummy (not a normal UDF filter)
+	for (auto &op : operators) {
+		// Collect UDF indexes in projections
+		if (op.get().type == PhysicalOperatorType::PROJECTION) {
+			auto &proj = (PhysicalProjection &)op.get();
+			for (auto &expr : proj.select_list) {
+				auto udf_indexes = GetUDFIndexes(expr);
+				projection_udf_indexes.insert(udf_indexes.begin(), udf_indexes.end());
+			}
+		}
+		// Collect UDF indexes in filters
+		if (op.get().type == PhysicalOperatorType::FILTER) {
+			auto &filter = (PhysicalFilter &)op.get();
+			auto udf_indexes = GetUDFIndexes(filter.expression);
+			filter_udf_indexes.insert(udf_indexes.begin(), udf_indexes.end());
+		}
+	}
+
+	// for every dummy UDF filter
+	for (auto filter_idx : filter_udf_indexes) {
+		// if the "use" of the UDF is in the same pipeline then we have to stream the UDF evaluation
+		if (projection_udf_indexes.contains(filter_idx)) {
+			udf_strategies[filter_idx] = UDFStrategy::STREAM;
+		}
+		// otherwise we materialize (woo!)
+		else {
+			udf_strategies[filter_idx] = UDFStrategy::MATERIALIZE;
+		}
+	}
+
 	// check if the pipeline is "LIP"-able
-	bool lip_enabled = DBConfig::GetConfig(GetClientContext()).options.lip;
+	bool lip_enabled = db.config.options.lip;
 	if (lip_enabled) {
 		for (auto op : operators) {
 			if (op.get().type == PhysicalOperatorType::HASH_JOIN) {

@@ -563,9 +563,10 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		}
 	};
 
-	auto &funcs = db.funcs;
+	auto &inner_funcs = db.inner_funcs;
+	auto &udf_strategies = db.udf_strategies;
 	auto &func_return_types = db.func_return_types;
-	idx_t function_index = funcs.size();
+	idx_t function_index = inner_funcs.size();
 
 	scalar_function_t func = [=, &db](DataChunk &input, ExpressionState &state, Vector &result) -> void {
 		// lookup UDF caching flag
@@ -652,7 +653,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			// execute the UDF directly if there are no python processes
 			if (DBConfig::GetConfig(state.GetContext()).options.maximum_python_processes == 0) {
 				inner_func(input, result);
-
 			}
 			// otherwise parallelize over the worker processes
 			else {
@@ -662,8 +662,9 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		}
 	};
 
-	funcs.push_back(inner_func);
+	inner_funcs.push_back(inner_func);
 	func_return_types.push_back(return_type);
+	udf_strategies.push_back(UDFStrategy::UNDECIDED);
 	return func;
 }
 
@@ -813,6 +814,7 @@ public:
 		    side_effects ? FunctionStability::VOLATILE : FunctionStability::CONSISTENT;
 		ScalarFunction scalar_function(name, std::move(parameters), return_type, func, nullptr, nullptr, nullptr,
 		                               nullptr, varargs, function_side_effects, null_handling);
+		db.scalar_funcs.push_back(scalar_function);
 		return scalar_function;
 	}
 };

@@ -741,7 +741,7 @@ void TaskScheduler::RunWorkerProcess(SharedWorkerBlock *block, int shm_fd, idx_t
 		output.Initialize(allocator, output_type);
 
 		// call the UDF
-		inner_scalar_function_t &func = db.funcs[block->function_index];
+		inner_scalar_function_t &func = db.inner_funcs[block->function_index];
 		func(input, output.data[0]);
 
 		// now serialize the output DataChunk

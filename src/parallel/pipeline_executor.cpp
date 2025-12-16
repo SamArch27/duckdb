@@ -396,6 +396,9 @@ PipelineExecuteResult PipelineExecutor::PushFinalize() {
 	for (idx_t i = 0; i < intermediate_states.size(); i++) {
 		intermediate_states[i]->Finalize(pipeline.operators[i].get(), context);
 	}
+
+	// TODO: Batch apply all of the UDF inputs buffered by this pipeline
+
 	pipeline.executor.Flush(thread);
 	local_sink_state.reset();
 
