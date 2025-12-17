@@ -180,7 +180,7 @@ static unique_ptr<GroupedAggregateHashTable> MakeCache(DataChunk &input, Express
 	auto output_types = vector<LogicalType>();
 	output_types.push_back(result.GetType());
 
-	auto first_agg = LastFunctionGetter::GetFunction(result.GetType());
+	auto first_agg = FirstFunctionGetter::GetFunction(result.GetType());
 	auto args = vector<unique_ptr<Expression>>();
 	args.push_back(make_uniq<BoundReferenceExpression>(result.GetType(), 0));
 	auto agg_expr =
@@ -639,7 +639,9 @@ public:
 		    side_effects ? FunctionStability::VOLATILE : FunctionStability::CONSISTENT;
 		ScalarFunction scalar_function(name, std::move(parameters), return_type, func, nullptr, nullptr, nullptr,
 		                               nullptr, varargs, function_side_effects, null_handling);
-		db.scalar_funcs.push_back(scalar_function);
+		if (udf_type == PythonUDFType::NATIVE) {
+			db.scalar_funcs.push_back(scalar_function);
+		}
 		return scalar_function;
 	}
 };
