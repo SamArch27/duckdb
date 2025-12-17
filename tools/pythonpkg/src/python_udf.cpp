@@ -180,7 +180,7 @@ static unique_ptr<GroupedAggregateHashTable> MakeCache(DataChunk &input, Express
 	auto output_types = vector<LogicalType>();
 	output_types.push_back(result.GetType());
 
-	auto first_agg = FirstFunctionGetter::GetFunction(result.GetType());
+	auto first_agg = LastFunctionGetter::GetFunction(result.GetType());
 	auto args = vector<unique_ptr<Expression>>();
 	args.push_back(make_uniq<BoundReferenceExpression>(result.GetType(), 0));
 	auto agg_expr =
