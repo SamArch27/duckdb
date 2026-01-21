@@ -19,6 +19,7 @@
 #include "duckdb/main/valid_checker.hpp"
 #include "duckdb/execution/aggregate_hashtable.hpp"
 #include <unordered_map>
+#include "duckdb/common/flat_hash_map.h"
 
 namespace duckdb {
 class BufferManager;
@@ -62,6 +63,7 @@ public:
 	vector<LogicalType> func_return_types;
 	vector<UDFStrategy> udf_strategies;
 	vector<unique_ptr<GroupedAggregateHashTable>> udf_caches;
+	vector<unique_ptr<ska::flat_hash_map<string_t, int64_t>>> udf_string_caches;
 
 public:
 	BufferPool &GetBufferPool() const;

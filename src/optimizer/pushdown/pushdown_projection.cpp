@@ -74,17 +74,17 @@ unique_ptr<LogicalOperator> FilterPushdown::PushdownProjection(unique_ptr<Logica
 		}
 	}
 
-	// for every projection containing a UDF, create a UDF to push down
-	for (auto &expr : proj.expressions) {
-		if (expr->ContainsUDF()) {
-			// construct udf(...) IS NOT NULL predicate
-			auto udf_filter =
-			    make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NOT_NULL, LogicalType::BOOLEAN);
-			udf_filter->children.push_back(expr->Copy());
-			// push it down in the query
-			child_pushdown.AddFilter(std::move(udf_filter));
-		}
-	}
+	// // for every projection containing a UDF, create a UDF to push down
+	// for (auto &expr : proj.expressions) {
+	// 	if (expr->ContainsUDF()) {
+	// 		// construct udf(...) IS NOT NULL predicate
+	// 		auto udf_filter =
+	// 		    make_uniq<BoundOperatorExpression>(ExpressionType::OPERATOR_IS_NOT_NULL, LogicalType::BOOLEAN);
+	// 		udf_filter->children.push_back(expr->Copy());
+	// 		// push it down in the query
+	// 		child_pushdown.AddFilter(std::move(udf_filter));
+	// 	}
+	// }
 
 	child_pushdown.GenerateFilters();
 	// now push into children

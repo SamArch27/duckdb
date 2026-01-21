@@ -7,6 +7,7 @@
 #include <chrono>
 #include <thread>
 #endif
+#include <iostream>
 
 namespace duckdb {
 
@@ -408,7 +409,12 @@ PipelineExecuteResult PipelineExecutor::PushFinalize() {
 		// if the strategy is to materialize
 		if (udf_strategies[i] == UDFStrategy::MATERIALIZE) {
 			if (udf_caches[i] != nullptr) {
+				auto before = std::chrono::high_resolution_clock::now();
 				scheduler.BatchExecuteUDFOnParallelWorkers(i);
+				auto after = std::chrono::high_resolution_clock::now();
+				std::cout << "Batch UDF application took: "
+				          << std::chrono::duration_cast<std::chrono::microseconds>(after - before).count() << " micros!"
+				          << std::endl;
 				udf_strategies[i] = UDFStrategy::LOOKUP;
 			}
 		}

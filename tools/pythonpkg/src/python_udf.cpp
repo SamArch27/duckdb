@@ -6,6 +6,7 @@
 #include "duckdb_python/pyconnection/pyconnection.hpp"
 #include "duckdb_python/pandas/pandas_scan.hpp"
 #include "duckdb/common/allocator.hpp"
+#include "duckdb/common/mutex.hpp"
 #include "duckdb/common/row_operations/row_operations.hpp"
 #include "duckdb/common/arrow/arrow.hpp"
 #include "duckdb/common/arrow/arrow_converter.hpp"
@@ -27,6 +28,7 @@
 #include "duckdb/function/function_binder.hpp"
 #include "duckdb_python/python_conversion.hpp"
 #include "duckdb/main/database.hpp"
+#include "duckdb/common/flat_hash_map.h"
 #include <chrono>
 namespace duckdb {
 
@@ -321,7 +323,9 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
                                               DatabaseInstance &db) {
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
+	//	mutex udf_mutex;
 	inner_scalar_function_t inner_func = [=, &db](DataChunk &input, Vector &result) -> void { // NOLINT
+		//		lock_guard<mutex> guard(udf_mutex);
 		py::gil_scoped_acquire gil;
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
@@ -375,6 +379,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	auto &udf_strategies = db.udf_strategies;
 	auto &func_return_types = db.func_return_types;
 	auto &udf_caches = db.udf_caches;
+	auto &udf_string_caches = db.udf_string_caches;
 	idx_t function_index = inner_funcs.size();
 
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
@@ -383,96 +388,283 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 		// ensure that the flag is set correctly for the UDF
 		auto udf_strategy = db.udf_strategies[function_index];
-		D_ASSERT(udf_strategy != UDFStrategy::UNDECIDED);
+		// D_ASSERT(udf_strategy != UDFStrategy::UNDECIDED);
 
 		auto &db_config = DBConfig::GetConfig(state.GetContext());
 
 		// lookup UDF caching flag
 		bool udf_caching = db_config.options.udf_caching;
-
-		// check for udf caching
 		if (udf_caching) {
-
-			// create a new data chunk to reference this one
-			DataChunk sliced_input;
-			auto input_types = input.GetTypes();
-			sliced_input.InitializeEmpty(input_types);
-			sliced_input.Reference(input);
-
-			// create state for the cache lookup
-			Vector addresses(LogicalType::POINTER);
-			SelectionVector misses;
-			misses.Initialize();
-
-			// check if the UDF cache has been created
-			auto &udf_cache = db.udf_caches[function_index];
-
-			// create it if it hasn't been created yet
-			if (udf_cache == nullptr) {
-				udf_cache = MakeCache(input, state, result);
-			}
-			auto &cache = udf_cache;
-
-			// lookup the DataChunk in the cache and see which indexes are misses
-			idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
-
-			// if we are materializing then skip the actual UDF call
-			if (udf_strategy == UDFStrategy::MATERIALIZE) {
-				// directly set the output to NOT NULl and return
-				for (idx_t i = 0; i < input.size(); ++i) {
-					FlatVector::SetNull(result, i, false);
+			if (input.GetTypes()[0] == LogicalType::VARCHAR && return_type == LogicalType::BIGINT) {
+				auto &udf_cache = db.udf_string_caches[function_index];
+				if (!udf_cache) {
+					udf_cache = make_uniq<ska::flat_hash_map<string_t, int64_t>>();
 				}
-				return;
-			}
+				auto &global_cache = *udf_cache;
+				auto &input_vec = input.data[0];
+				auto result_data = FlatVector::GetData<int64_t>(result);
 
-			// create a vector to store the result
-			Vector sliced_result(result.GetType());
-			sliced_result.Flatten(miss_count);
+				if (input_vec.GetVectorType() == VectorType::DICTIONARY_VECTOR) {
+					auto &dict = DictionaryVector::Child(input_vec);
+					auto dict_data = FlatVector::GetData<string_t>(dict);
+					idx_t dict_size = DictionaryVector::DictionarySize(input_vec).GetIndex();
+					auto &sel = DictionaryVector::SelVector(input_vec);
+					auto *sel_data = sel.data();
 
-			// create a sliced input and only compute the UDF on the misses
-			sliced_input.Slice(misses, miss_count);
+					// misses selection vector
+					SelectionVector misses;
+					misses.Initialize();
 
-			// execute the UDF directly if there are no python processes
-			if (db_config.options.maximum_python_processes == 0) {
-				if (miss_count != 0) {
+					// map of code to the first index
+					vector<idx_t> code_to_first_index(dict_size, idx_t(-1));
+					idx_t miss_count = 0;
+					for (idx_t i = 0; i < input.size(); ++i) {
+						// get the code
+						idx_t code = static_cast<idx_t>(sel_data[i]);
+						// find its first index
+						if (code_to_first_index[code] == -1) {
+							// save the first index
+							code_to_first_index[code] = i;
+							// handle NULL
+							if (FlatVector::IsNull(dict, code)) {
+								misses.set_index(miss_count++, i);
+								continue;
+							}
+							// now check if its a miss
+							auto key_it = global_cache.find(dict_data[code]);
+							// if its a miss then add it to the selection vector
+							if (key_it == global_cache.end()) {
+								misses.set_index(miss_count++, i);
+							} else {
+								// otherwise write out the cached result
+								result_data[i] = key_it->second;
+							}
+						}
+					}
+
+					// create a input vector sliced to the misses
+					DataChunk sliced_input;
+					sliced_input.InitializeEmpty(input.GetTypes());
+					sliced_input.Reference(input);
+					sliced_input.Slice(misses, miss_count);
+
+					// create a result vector sliced to the misses
+					Vector sliced_result(result.GetType());
+					sliced_result.Flatten(miss_count);
+
+					// invoke the UDF on the misses
 					inner_func(sliced_input, sliced_result);
-				}
-			}
 
-			// otherwise parallelize over the worker processes
-			else {
-				auto &scheduler = TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db));
+					// get the data from the result
+					auto sliced_result_data = FlatVector::GetData<int64_t>(sliced_result);
+
+					// write each miss out
+					for (idx_t i = 0; i < miss_count; ++i) {
+						auto target = misses[i];
+
+						// copy nulls
+						if (FlatVector::IsNull(sliced_result, i)) {
+							FlatVector::SetNull(result, target, true);
+							continue;
+						}
+
+						// copy result
+						auto value = sliced_result_data[i];
+						result_data[target] = value;
+						FlatVector::SetNull(result, target, false);
+
+						// add the result to the UDF cache
+						global_cache.emplace(dict_data[sel_data[target]], value);
+					}
+
+					// broadcast the results using first_idx
+					for (idx_t i = 0; i < input.size(); ++i) {
+						// first get the code
+						idx_t code = static_cast<idx_t>(sel_data[i]);
+						// then get the first index with that code
+						idx_t first_index = code_to_first_index[code];
+						// skip if this is the first index
+						if (i == first_index) {
+							continue;
+						}
+						// otherwise copy the result over to this index
+						result_data[i] = result_data[first_index];
+						// and copy the null value (true or false)
+						FlatVector::SetNull(result, i, FlatVector::IsNull(result, first_index));
+					}
+
+				} else {
+
+					input_vec.Flatten(input.size());
+					auto input_data = FlatVector::GetData<string_t>(input_vec);
+
+					// misses selection vector
+					SelectionVector misses;
+					misses.Initialize();
+
+					// map of index to the first index
+					unordered_map<string_t, idx_t> key_to_first_idx;
+					idx_t miss_count = 0;
+					for (idx_t i = 0; i < input.size(); ++i) {
+						// get the key
+						auto &val = input_data[i];
+						// find its first index
+						auto it = key_to_first_idx.find(val);
+						// if this key does not have a first index
+						if (it == key_to_first_idx.end()) {
+							// save the first index
+							key_to_first_idx.emplace(val, i);
+							// handle NULL
+							if (FlatVector::IsNull(input_vec, i)) {
+								misses.set_index(miss_count++, i);
+								continue;
+							}
+							// now check if its a miss
+							auto key_it = global_cache.find(val);
+							// if its a miss then add it to the selection vector
+							if (key_it == global_cache.end()) {
+								misses.set_index(miss_count++, i);
+							} else {
+								// otherwise write out the cached result
+								result_data[i] = key_it->second;
+							}
+						}
+					}
+
+					// create a input vector sliced to the misses
+					DataChunk sliced_input;
+					sliced_input.InitializeEmpty(input.GetTypes());
+					sliced_input.Reference(input);
+					sliced_input.Slice(misses, miss_count);
+
+					// create a result vector sliced to the misses
+					Vector sliced_result(result.GetType());
+					sliced_result.Flatten(miss_count);
+
+					// invoke the UDF on the misses
+					inner_func(sliced_input, sliced_result);
+
+					// get the data from the result
+					auto sliced_result_data = FlatVector::GetData<int64_t>(sliced_result);
+
+					// write each miss out
+					for (idx_t i = 0; i < miss_count; ++i) {
+						auto target = misses[i];
+
+						// copy nulls
+						if (FlatVector::IsNull(sliced_result, i)) {
+							FlatVector::SetNull(result, target, true);
+							continue;
+						}
+
+						// copy result
+						auto value = sliced_result_data[i];
+						result_data[target] = value;
+						FlatVector::SetNull(result, target, false);
+
+						// add the result to the UDF cache
+						global_cache.emplace(input_data[target], value);
+					}
+
+					// broadcast the results using first_idx
+					for (idx_t i = 0; i < input.size(); ++i) {
+						// first get the key
+						auto &key = input_data[i];
+						// then get the first index with that code
+						idx_t first_index = key_to_first_idx.at(key);
+						// skip if this is the first index
+						if (i == first_index) {
+							continue;
+						}
+						// otherwise copy the result over to this index
+						result_data[i] = result_data[first_index];
+						// and copy the null value (true or false)
+						FlatVector::SetNull(result, i, FlatVector::IsNull(result, first_index));
+					}
+				}
+			} else {
+
+				// create a new data chunk to reference this one
+				DataChunk sliced_input;
+				auto input_types = input.GetTypes();
+				sliced_input.InitializeEmpty(input_types);
+				sliced_input.Reference(input);
+
+				// create state for the cache lookup
+				Vector addresses(LogicalType::POINTER);
+				SelectionVector misses;
+				misses.Initialize();
+
+				// check if the UDF cache has been created
+				auto &udf_cache = db.udf_caches[function_index];
+
+				// create it if it hasn't been created yet
+				if (udf_cache == nullptr) {
+					udf_cache = MakeCache(input, state, result);
+				}
+				auto &cache = udf_cache;
+
+				// lookup the DataChunk in the cache and see which indexes are misses
+				idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
+
+				// if we are materializing then skip the actual UDF call
+				if (udf_strategy == UDFStrategy::MATERIALIZE) {
+					// directly set the output to NOT NULl and return
+					for (idx_t i = 0; i < input.size(); ++i) {
+						FlatVector::SetNull(result, i, false);
+					}
+					return;
+				}
+
+				// create a vector to store the result
+				Vector sliced_result(result.GetType());
+				sliced_result.Flatten(miss_count);
+
+				// create a sliced input and only compute the UDF on the misses
+				sliced_input.Slice(misses, miss_count);
+
+				// execute the UDF directly if there are no python processes
+				if (db_config.options.maximum_python_processes == 0) {
+					if (miss_count != 0) {
+						inner_func(sliced_input, sliced_result);
+					}
+				}
+
+				// otherwise parallelize over the worker processes
+				else {
+					auto &scheduler = TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db));
+					if (miss_count != 0) {
+						scheduler.ExecuteUDFOnParallelWorkers(sliced_input, function_index, sliced_result);
+					}
+				}
+
+				// for each miss, copy it into the correct location in the output
+				for (idx_t source = 0; source < miss_count; ++source) {
+					idx_t target = misses[source];
+					result.SetValue(target, sliced_result.GetValue(source));
+				}
+
+				// create a DataChunk referencing the output result vector
+				DataChunk output;
+				auto result_type = vector<LogicalType>(1, result.GetType());
+				output.Initialize(Allocator::DefaultAllocator(), result_type);
+				output.SetCardinality(input);
+				output.data[0].Reference(result);
+
+				// insert the new values into the cache (if there are any)
 				if (miss_count != 0) {
-					scheduler.ExecuteUDFOnParallelWorkers(sliced_input, function_index, sliced_result);
+					cache->AddChunk(input, output, AggregateType::NON_DISTINCT);
 				}
-			}
 
-			// for each miss, copy it into the correct location in the output
-			for (idx_t source = 0; source < miss_count; ++source) {
-				idx_t target = misses[source];
-				result.SetValue(target, sliced_result.GetValue(source));
-			}
+				// now copy the contents of the UDF cache to the real result vector
+				RowOperationsState row_state(cache->GetAggregateAllocatorRef());
+				RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, output, 0);
 
-			// create a DataChunk referencing the output result vector
-			DataChunk output;
-			auto result_type = vector<LogicalType>(1, result.GetType());
-			output.Initialize(Allocator::DefaultAllocator(), result_type);
-			output.SetCardinality(input);
-			output.data[0].Reference(result);
-
-			// insert the new values into the cache (if there are any)
-			if (miss_count != 0) {
-				cache->AddChunk(input, output, AggregateType::NON_DISTINCT);
-			}
-
-			// now copy the contents of the UDF cache to the real result vector
-			RowOperationsState row_state(cache->GetAggregateAllocatorRef());
-			RowOperations::FinalizeStates(row_state, cache->GetLayout(), addresses, output, 0);
-
-			// propagate null mask
-			for (idx_t i = 0; i < input.size(); ++i) {
-				if (FlatVector::IsNull(output.data[0], i)) {
-					FlatVector::SetNull(result, i, true);
+				// propagate null mask
+				for (idx_t i = 0; i < input.size(); ++i) {
+					if (FlatVector::IsNull(output.data[0], i)) {
+						FlatVector::SetNull(result, i, true);
+					}
 				}
 			}
 		} else {
@@ -493,6 +685,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	func_return_types.push_back(return_type);
 	udf_strategies.push_back(UDFStrategy::UNDECIDED);
 	udf_caches.push_back(nullptr);
+	udf_string_caches.push_back(nullptr);
 	return func;
 }
 

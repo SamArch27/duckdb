@@ -53,7 +53,7 @@ class TaskScheduler {
 
 	// timeout for semaphore wait, default 5ms
 	constexpr static int64_t TASK_TIMEOUT_USECS = 5000;
-	constexpr static idx_t SHM_BUFFER_SIZE = 64 * 1024 * 1024;
+	constexpr static idx_t SHM_BUFFER_SIZE = 1024 * 1024 * 1024;
 	constexpr static idx_t EXIT_FUNCTION_INDEX = DConstants::INVALID_INDEX;
 
 	struct SharedWorkerBlock {

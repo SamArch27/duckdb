@@ -692,12 +692,16 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 	distinct_rows.Initialize(Allocator::DefaultAllocator(), input_types);
 	payload_rows.Initialize(Allocator::DefaultAllocator(), return_type);
 
+	auto a = std::chrono::high_resolution_clock::now();
+
 	// Serialize the entire input from the cache into shared memory
 	idx_t chunk_count = 0;
 	while (cache->Scan(ht_scan_state, distinct_rows, payload_rows)) {
 		++chunk_count;
 		SerializeDataChunk(input_stream, distinct_rows);
 	}
+
+	auto b = std::chrono::high_resolution_clock::now();
 
 	// Wake up all of the worker processes to execute the UDF in parallel
 	for (idx_t i = 0; i < num_procs; ++i) {
@@ -720,6 +724,8 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 		}
 	}
 
+	auto c = std::chrono::high_resolution_clock::now();
+
 	// create an output stream for each worker
 	vector<MemoryStream> output_streams;
 	for (idx_t i = 0; i < num_procs; ++i) {
@@ -730,6 +736,11 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 
 	// reset the input stream
 	input_stream.Rewind();
+
+	// clear the HT so we can now fill it with the actual results
+	cache->Abandon();
+
+	auto d = std::chrono::high_resolution_clock::now();
 
 	// for each chunk
 	for (idx_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx) {
@@ -767,12 +778,25 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 		cache->AddChunk(input, result, AggregateType::NON_DISTINCT);
 	}
 
+	auto e = std::chrono::high_resolution_clock::now();
+
 	// reset the futex for each worker
 	for (idx_t i = 0; i < num_procs; ++i) {
 		auto &proc = processes[i];
 		auto *block = proc.shared_block;
 		block->futex_done.store(0, std::memory_order_release);
 	}
+
+	std::cout << "Total time: " << std::chrono::duration_cast<std::chrono::microseconds>(e - a).count() << " micros!"
+	          << std::endl;
+	std::cout << "Scan cache time: " << std::chrono::duration_cast<std::chrono::microseconds>(b - a).count()
+	          << " micros!" << std::endl;
+	std::cout << "Waiting for UDF to complete time: "
+	          << std::chrono::duration_cast<std::chrono::microseconds>(c - b).count() << " micros!" << std::endl;
+	std::cout << "Clearing cache time: " << std::chrono::duration_cast<std::chrono::microseconds>(d - c).count()
+	          << " micros!" << std::endl;
+	std::cout << "Combining results and inserting into cache time: "
+	          << std::chrono::duration_cast<std::chrono::microseconds>(e - d).count() << " micros!" << std::endl;
 }
 
 void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result) {
@@ -928,8 +952,7 @@ void TaskScheduler::RelaunchProcessesInternal(int32_t n) {
 			if (proc.shared_block == MAP_FAILED) {
 				throw InternalException("Error: mmap(...) failed!");
 			}
-			// zero out the memory
-			memset(static_cast<void *>(proc.shared_block), 0, sizeof(SharedWorkerBlock));
+
 			// zero out all of the atomics
 			proc.shared_block->futex_cmd.store(0, std::memory_order_relaxed);
 			proc.shared_block->futex_done.store(0, std::memory_order_relaxed);
