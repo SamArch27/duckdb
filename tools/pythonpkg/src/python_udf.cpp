@@ -29,7 +29,6 @@
 #include "duckdb_python/python_conversion.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/common/flat_hash_map.h"
-#include <chrono>
 namespace duckdb {
 
 static py::list ConvertToSingleBatch(vector<LogicalType> &types, vector<string> &names, DataChunk &input,
@@ -380,6 +379,8 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	auto &func_return_types = db.func_return_types;
 	auto &udf_caches = db.udf_caches;
 	auto &udf_string_caches = db.udf_string_caches;
+	auto &udf_string_inputs = db.udf_string_inputs;
+
 	idx_t function_index = inner_funcs.size();
 
 	scalar_function_t func = [=](DataChunk &input, ExpressionState &state, Vector &result) -> void {
@@ -397,34 +398,50 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		if (udf_caching) {
 			if (input.GetTypes()[0] == LogicalType::VARCHAR && return_type == LogicalType::BIGINT) {
 				auto &udf_cache = db.udf_string_caches[function_index];
+				auto &udf_inputs = db.udf_string_inputs[function_index];
 				if (!udf_cache) {
 					udf_cache = make_uniq<ska::flat_hash_map<string_t, int64_t>>();
+					udf_inputs = make_uniq<ska::flat_hash_set<string_t>>();
 				}
 				auto &global_cache = *udf_cache;
+				auto &global_inputs = *udf_inputs;
 				auto &input_vec = input.data[0];
 				auto result_data = FlatVector::GetData<int64_t>(result);
 
 				if (input_vec.GetVectorType() == VectorType::DICTIONARY_VECTOR) {
 					auto &dict = DictionaryVector::Child(input_vec);
 					auto dict_data = FlatVector::GetData<string_t>(dict);
-					idx_t dict_size = DictionaryVector::DictionarySize(input_vec).GetIndex();
 					auto &sel = DictionaryVector::SelVector(input_vec);
 					auto *sel_data = sel.data();
+
+					// if we are materializing then skip the actual UDF call
+					if (udf_strategy == UDFStrategy::MATERIALIZE) {
+						// directly set the output to NOT NULL and return
+						for (idx_t i = 0; i < input.size(); ++i) {
+							FlatVector::SetNull(result, i, false);
+							if (!FlatVector::IsNull(dict, sel_data[i])) {
+								global_inputs.insert(dict_data[sel_data[i]]);
+							}
+						}
+						return;
+					}
 
 					// misses selection vector
 					SelectionVector misses;
 					misses.Initialize();
 
 					// map of code to the first index
-					vector<idx_t> code_to_first_index(dict_size, idx_t(-1));
+					auto code_to_first_index = ska::flat_hash_map<sel_t, idx_t>();
+					code_to_first_index.reserve(input.size());
 					idx_t miss_count = 0;
 					for (idx_t i = 0; i < input.size(); ++i) {
 						// get the code
-						idx_t code = static_cast<idx_t>(sel_data[i]);
+						sel_t code = sel_data[i];
 						// find its first index
-						if (code_to_first_index[code] == -1) {
+						auto it = code_to_first_index.find(code);
+						if (it == code_to_first_index.end()) {
 							// save the first index
-							code_to_first_index[code] = i;
+							code_to_first_index.emplace(code, i);
 							// handle NULL
 							if (FlatVector::IsNull(dict, code)) {
 								misses.set_index(miss_count++, i);
@@ -453,7 +470,9 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 					sliced_result.Flatten(miss_count);
 
 					// invoke the UDF on the misses
-					inner_func(sliced_input, sliced_result);
+					if (miss_count != 0) {	
+					    inner_func(sliced_input, sliced_result);
+					}
 
 					// get the data from the result
 					auto sliced_result_data = FlatVector::GetData<int64_t>(sliced_result);
@@ -480,9 +499,9 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 					// broadcast the results using first_idx
 					for (idx_t i = 0; i < input.size(); ++i) {
 						// first get the code
-						idx_t code = static_cast<idx_t>(sel_data[i]);
+						sel_t code = sel_data[i];
 						// then get the first index with that code
-						idx_t first_index = code_to_first_index[code];
+						idx_t first_index = code_to_first_index.at(code);
 						// skip if this is the first index
 						if (i == first_index) {
 							continue;
@@ -498,22 +517,35 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 					input_vec.Flatten(input.size());
 					auto input_data = FlatVector::GetData<string_t>(input_vec);
 
+					// if we are materializing then skip the actual UDF call
+					if (udf_strategy == UDFStrategy::MATERIALIZE) {
+						// directly set the output to NOT NULL and return
+						for (idx_t i = 0; i < input.size(); ++i) {
+							FlatVector::SetNull(result, i, false);
+							if (!FlatVector::IsNull(input_vec, i)) {
+								global_inputs.insert(input_data[i]);
+							}
+						}
+						return;
+					}
+
 					// misses selection vector
 					SelectionVector misses;
 					misses.Initialize();
 
 					// map of index to the first index
-					unordered_map<string_t, idx_t> key_to_first_idx;
+					auto key_to_first_index = ska::flat_hash_map<string_t, idx_t>();
+					key_to_first_index.reserve(input.size());
 					idx_t miss_count = 0;
 					for (idx_t i = 0; i < input.size(); ++i) {
 						// get the key
 						auto &val = input_data[i];
 						// find its first index
-						auto it = key_to_first_idx.find(val);
+						auto it = key_to_first_index.find(val);
 						// if this key does not have a first index
-						if (it == key_to_first_idx.end()) {
+						if (it == key_to_first_index.end()) {
 							// save the first index
-							key_to_first_idx.emplace(val, i);
+							key_to_first_index.emplace(val, i);
 							// handle NULL
 							if (FlatVector::IsNull(input_vec, i)) {
 								misses.set_index(miss_count++, i);
@@ -571,7 +603,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 						// first get the key
 						auto &key = input_data[i];
 						// then get the first index with that code
-						idx_t first_index = key_to_first_idx.at(key);
+						idx_t first_index = key_to_first_index.at(key);
 						// skip if this is the first index
 						if (i == first_index) {
 							continue;
@@ -609,7 +641,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 				// if we are materializing then skip the actual UDF call
 				if (udf_strategy == UDFStrategy::MATERIALIZE) {
-					// directly set the output to NOT NULl and return
+					// directly set the output to NOT NULL and return
 					for (idx_t i = 0; i < input.size(); ++i) {
 						FlatVector::SetNull(result, i, false);
 					}
@@ -686,6 +718,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	udf_strategies.push_back(UDFStrategy::UNDECIDED);
 	udf_caches.push_back(nullptr);
 	udf_string_caches.push_back(nullptr);
+	udf_string_inputs.push_back(nullptr);
 	return func;
 }
 

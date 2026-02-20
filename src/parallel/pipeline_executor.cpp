@@ -8,6 +8,8 @@
 #include <thread>
 #endif
 #include <iostream>
+#include <chrono>
+
 
 namespace duckdb {
 
@@ -403,18 +405,18 @@ PipelineExecuteResult PipelineExecutor::PushFinalize() {
 	auto &scalar_funcs = db.scalar_funcs;
 	auto &udf_strategies = db.udf_strategies;
 	auto &udf_caches = db.udf_caches;
+	auto &udf_inputs = db.udf_string_inputs;
+
 	auto &scheduler = TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db));
 
 	for (idx_t i = 0; i < scalar_funcs.size(); ++i) {
 		// if the strategy is to materialize
 		if (udf_strategies[i] == UDFStrategy::MATERIALIZE) {
-			if (udf_caches[i] != nullptr) {
-				auto before = std::chrono::high_resolution_clock::now();
+			if (udf_caches[i] != nullptr || udf_inputs[i] != nullptr) {
+				auto start = std::chrono::high_resolution_clock::now();
 				scheduler.BatchExecuteUDFOnParallelWorkers(i);
-				auto after = std::chrono::high_resolution_clock::now();
-				std::cout << "Batch UDF application took: "
-				          << std::chrono::duration_cast<std::chrono::microseconds>(after - before).count() << " micros!"
-				          << std::endl;
+				auto end = std::chrono::high_resolution_clock::now();
+				std::cout << "UDF Parallel Pipeline took: " << std::chrono::duration_cast<std::chrono::microseconds>(end - start).count() << " microseconds" << std::endl;
 				udf_strategies[i] = UDFStrategy::LOOKUP;
 			}
 		}

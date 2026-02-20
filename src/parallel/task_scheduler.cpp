@@ -27,9 +27,6 @@
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/execution/aggregate_hashtable.hpp"
 #include <sys/mman.h>
-
-#include <iostream>
-
 namespace duckdb {
 
 struct SchedulerThread {
@@ -681,27 +678,45 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 	// serialize input
 	auto input_stream = MemoryStream(static_cast<data_ptr_t>(input_buffer), SHM_BUFFER_SIZE);
 
-	// for each entry in the cache, serialize to shared memory
-	auto &cache = db.udf_caches[function_index];
-	AggregateHTScanState ht_scan_state;
-	cache->InitializeScan(ht_scan_state);
-
 	// create data chunks to store the current vector from the scan
 	DataChunk distinct_rows;
 	DataChunk payload_rows;
 	distinct_rows.Initialize(Allocator::DefaultAllocator(), input_types);
 	payload_rows.Initialize(Allocator::DefaultAllocator(), return_type);
 
-	auto a = std::chrono::high_resolution_clock::now();
-
-	// Serialize the entire input from the cache into shared memory
 	idx_t chunk_count = 0;
-	while (cache->Scan(ht_scan_state, distinct_rows, payload_rows)) {
-		++chunk_count;
-		SerializeDataChunk(input_stream, distinct_rows);
-	}
+	auto &cache = db.udf_caches[function_index];
+	auto &string_cache = db.udf_string_caches[function_index];
+	auto &string_inputs = db.udf_string_inputs[function_index];
+	if (string_cache) {
+		idx_t i = 0;
+		auto distinct_data = FlatVector::GetData<string_t>(distinct_rows.data[0]);
+		for (auto k : *string_inputs) {
+			if (i == STANDARD_VECTOR_SIZE) {
+				++chunk_count;
+				distinct_rows.SetCardinality(i);
+				SerializeDataChunk(input_stream, distinct_rows);
+				i = 0;
+			}
+			distinct_data[i] = k;
+			++i;
+		}
+		if (i != 0) {
+			++chunk_count;
+			distinct_rows.SetCardinality(i);
+			SerializeDataChunk(input_stream, distinct_rows);
+		}
+	} else {
+		// for each entry in the cache, serialize to shared memory
+		AggregateHTScanState ht_scan_state;
+		cache->InitializeScan(ht_scan_state);
 
-	auto b = std::chrono::high_resolution_clock::now();
+		// Serialize the entire input from the cache into shared memory
+		while (cache->Scan(ht_scan_state, distinct_rows, payload_rows)) {
+			++chunk_count;
+			SerializeDataChunk(input_stream, distinct_rows);
+		}
+	}
 
 	// Wake up all of the worker processes to execute the UDF in parallel
 	for (idx_t i = 0; i < num_procs; ++i) {
@@ -724,8 +739,6 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 		}
 	}
 
-	auto c = std::chrono::high_resolution_clock::now();
-
 	// create an output stream for each worker
 	vector<MemoryStream> output_streams;
 	for (idx_t i = 0; i < num_procs; ++i) {
@@ -737,48 +750,54 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 	// reset the input stream
 	input_stream.Rewind();
 
-	// clear the HT so we can now fill it with the actual results
-	cache->Abandon();
-
-	auto d = std::chrono::high_resolution_clock::now();
+	if (!string_cache) {
+		// clear the HT so we can now fill it with the actual results
+		cache->Abandon();
+	}
 
 	// for each chunk
 	for (idx_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx) {
 		DataChunk result;
 		result.Initialize(Allocator::DefaultAllocator(), return_type);
-
-		// combine the partial results from each process
-		for (idx_t i = 0; i < num_procs; ++i) {
-
-			// save the cursor position so it can be updated correctly later
-			auto &output_stream = output_streams[i];
-			idx_t old_pos = output_stream.GetPosition();
-
-			// read out the partial result
-			DataChunk output;
-			idx_t length = DeserializeDataChunk(output_stream, output);
-			output_stream.SetPosition(old_pos + length);
-
-			// compute range for that process
-			idx_t start_row = i * output.size() / num_procs;
-			idx_t end_row = (i == num_procs - 1) ? output.size() : (i + 1) * output.size() / num_procs;
-			idx_t sliced_count = end_row - start_row;
-
-			// now copy the partial result from this process into the final result
-			VectorOperations::Copy(output.data[0], result.data[0], sliced_count, 0, start_row);
-		}
-
+		
 		// Deserialize the next input from our own stream
 		DataChunk input;
 		idx_t old_pos = input_stream.GetPosition();
 		idx_t length = DeserializeDataChunk(input_stream, input);
 		input_stream.SetPosition(old_pos + length);
 
-		// Add the new chunk (with the result this time!) into the cache
-		cache->AddChunk(input, result, AggregateType::NON_DISTINCT);
-	}
+		// combine the partial results from each process
+		for (idx_t i = 0; i < num_procs; ++i) {
+			// save the cursor position so it can be updated correctly later
+			auto &output_stream = output_streams[i];
+			idx_t old_pos = output_stream.GetPosition();
+			
+			// read out the partial result
+			DataChunk output;
+			idx_t length = DeserializeDataChunk(output_stream, output);
+			output_stream.SetPosition(old_pos + length);
 
-	auto e = std::chrono::high_resolution_clock::now();
+			// compute range for that process
+		        idx_t start_row = i * input.size() / num_procs;
+			idx_t sliced_count = output.size(); 
+
+			// now copy the partial result from this process into the final result
+			VectorOperations::Copy(output.data[0], result.data[0], sliced_count, 0, start_row);
+		}
+
+		
+		// TODO: Perfect hashing???
+		if (string_cache) {
+			auto input_data = FlatVector::GetData<string_t>(input.data[0]);
+			auto result_data = FlatVector::GetData<int64_t>(result.data[0]);
+			for (idx_t i = 0; i < input.size(); ++i) {
+				string_cache->emplace(input_data[i], result_data[i]);
+			}
+		} else {
+			// Add the new chunk (with the result this time!) into the cache
+			cache->AddChunk(input, result, AggregateType::NON_DISTINCT);
+		}
+	}
 
 	// reset the futex for each worker
 	for (idx_t i = 0; i < num_procs; ++i) {
@@ -786,17 +805,6 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 		auto *block = proc.shared_block;
 		block->futex_done.store(0, std::memory_order_release);
 	}
-
-	std::cout << "Total time: " << std::chrono::duration_cast<std::chrono::microseconds>(e - a).count() << " micros!"
-	          << std::endl;
-	std::cout << "Scan cache time: " << std::chrono::duration_cast<std::chrono::microseconds>(b - a).count()
-	          << " micros!" << std::endl;
-	std::cout << "Waiting for UDF to complete time: "
-	          << std::chrono::duration_cast<std::chrono::microseconds>(c - b).count() << " micros!" << std::endl;
-	std::cout << "Clearing cache time: " << std::chrono::duration_cast<std::chrono::microseconds>(d - c).count()
-	          << " micros!" << std::endl;
-	std::cout << "Combining results and inserting into cache time: "
-	          << std::chrono::duration_cast<std::chrono::microseconds>(e - d).count() << " micros!" << std::endl;
 }
 
 void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result) {
