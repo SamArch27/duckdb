@@ -322,9 +322,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
                                               DatabaseInstance &db) {
 	// Through the capture of the lambda, we have access to the function pointer
 	// We just need to make sure that it doesn't get garbage collected
-	//	mutex udf_mutex;
 	inner_scalar_function_t inner_func = [=, &db](DataChunk &input, Vector &result) -> void { // NOLINT
-		//		lock_guard<mutex> guard(udf_mutex);
 		py::gil_scoped_acquire gil;
 
 		const bool default_null_handling = null_handling == FunctionNullHandling::DEFAULT_NULL_HANDLING;
@@ -378,6 +376,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	auto &udf_strategies = db.udf_strategies;
 	auto &func_return_types = db.func_return_types;
 	auto &udf_caches = db.udf_caches;
+	auto &udf_locks = db.udf_locks;
 	auto &udf_string_caches = db.udf_string_caches;
 	auto &udf_string_inputs = db.udf_string_inputs;
 
@@ -629,15 +628,25 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 				// check if the UDF cache has been created
 				auto &udf_cache = db.udf_caches[function_index];
+				auto &udf_lock = db.udf_locks[function_index];
 
-				// create it if it hasn't been created yet
-				if (udf_cache == nullptr) {
-					udf_cache = MakeCache(input, state, result);
+				{
+					lock_guard<mutex> cache_lock(*udf_lock);
+					{
+						// create it if it hasn't been created yet
+						if (udf_cache == nullptr) {
+							udf_cache = MakeCache(input, state, result);
+						}
+					}
 				}
 				auto &cache = udf_cache;
 
 				// lookup the DataChunk in the cache and see which indexes are misses
-				idx_t miss_count = cache->FindOrCreateGroups(input, addresses, misses);
+				idx_t miss_count = 0;
+				{
+					lock_guard<mutex> cache_lock(*udf_lock);	
+					miss_count = cache->FindOrCreateGroups(input, addresses, misses);
+				}
 
 				// if we are materializing then skip the actual UDF call
 				if (udf_strategy == UDFStrategy::MATERIALIZE) {
@@ -685,6 +694,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 
 				// insert the new values into the cache (if there are any)
 				if (miss_count != 0) {
+					lock_guard<mutex> cache_lock(*udf_lock);
 					cache->AddChunk(input, output, AggregateType::NON_DISTINCT);
 				}
 
@@ -717,6 +727,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	func_return_types.push_back(return_type);
 	udf_strategies.push_back(UDFStrategy::UNDECIDED);
 	udf_caches.push_back(nullptr);
+	udf_locks.push_back(make_uniq<mutex>());
 	udf_string_caches.push_back(nullptr);
 	udf_string_inputs.push_back(nullptr);
 	return func;
