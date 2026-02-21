@@ -27,6 +27,9 @@
 #include "duckdb/common/serializer/memory_stream.hpp"
 #include "duckdb/execution/aggregate_hashtable.hpp"
 #include <sys/mman.h>
+
+#include <iostream>
+#include <chrono>
 namespace duckdb {
 
 struct SchedulerThread {
@@ -684,21 +687,23 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 	distinct_rows.Initialize(Allocator::DefaultAllocator(), input_types);
 	payload_rows.Initialize(Allocator::DefaultAllocator(), return_type);
 
+	auto a = std::chrono::high_resolution_clock::now();
+
 	idx_t chunk_count = 0;
 	auto &cache = db.udf_caches[function_index];
-	auto &string_cache = db.udf_string_caches[function_index];
-	auto &string_inputs = db.udf_string_inputs[function_index];
-	if (string_cache) {
+	auto &string_inputs = db.udf_inputs[function_index];
+	auto &string_outputs = db.udf_outputs[function_index];
+	if (string_inputs) {
 		idx_t i = 0;
 		auto distinct_data = FlatVector::GetData<string_t>(distinct_rows.data[0]);
-		for (auto k : *string_inputs) {
+		for (const auto& input : *string_inputs) {
 			if (i == STANDARD_VECTOR_SIZE) {
 				++chunk_count;
 				distinct_rows.SetCardinality(i);
 				SerializeDataChunk(input_stream, distinct_rows);
 				i = 0;
 			}
-			distinct_data[i] = k;
+			distinct_data[i] = input;
 			++i;
 		}
 		if (i != 0) {
@@ -718,6 +723,8 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 		}
 	}
 
+	auto b = std::chrono::high_resolution_clock::now();
+
 	// Wake up all of the worker processes to execute the UDF in parallel
 	for (idx_t i = 0; i < num_procs; ++i) {
 		auto &proc = processes[i];
@@ -729,6 +736,8 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 		block->futex_cmd.store(1, std::memory_order_release);
 		futex_wake(&block->futex_cmd);
 	}
+	
+	auto c = std::chrono::high_resolution_clock::now();
 
 	// wait until all processes have completed
 	for (idx_t i = 0; i < num_procs; ++i) {
@@ -738,6 +747,8 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 			futex_wait(&block->futex_done, 0);
 		}
 	}
+
+	auto d = std::chrono::high_resolution_clock::now();
 
 	// create an output stream for each worker
 	vector<MemoryStream> output_streams;
@@ -750,10 +761,15 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 	// reset the input stream
 	input_stream.Rewind();
 
-	if (!string_cache) {
+	if (!string_inputs) {
 		// clear the HT so we can now fill it with the actual results
 		cache->Abandon();
+	} else {
+		// TODO: Add to cache
 	}
+
+
+	auto e = std::chrono::high_resolution_clock::now();
 
 	// for each chunk
 	for (idx_t chunk_idx = 0; chunk_idx < chunk_count; ++chunk_idx) {
@@ -787,11 +803,17 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 
 		
 		// TODO: Perfect hashing???
-		if (string_cache) {
+		if (string_inputs) {
 			auto input_data = FlatVector::GetData<string_t>(input.data[0]);
-			auto result_data = FlatVector::GetData<int64_t>(result.data[0]);
+			auto result_data = FlatVector::GetData<string_t>(result.data[0]);
+			
 			for (idx_t i = 0; i < input.size(); ++i) {
-				string_cache->emplace(input_data[i], result_data[i]);
+ 				// skip nulls
+				if (FlatVector::IsNull(result.data[0], i)) {
+					continue;
+				}
+				// save outputs directly
+				string_outputs->emplace_back(result_data[i].GetString());
 			}
 		} else {
 			// Add the new chunk (with the result this time!) into the cache
@@ -805,6 +827,14 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 		auto *block = proc.shared_block;
 		block->futex_done.store(0, std::memory_order_release);
 	}
+
+	auto f = std::chrono::high_resolution_clock::now();
+
+	std::cout << "Loading UDF results into cache took: " << std::chrono::duration_cast<std::chrono::microseconds>(f-e).count() << " micros" << std::endl;
+	std::cout << "Clearing cache took: " << std::chrono::duration_cast<std::chrono::microseconds>(e-d).count() << " micros" << std::endl;
+	std::cout << "Waiting for workers to finish took: " << std::chrono::duration_cast<std::chrono::microseconds>(d-c).count() << " micros" << std::endl;
+	std::cout << "Waiting up workers took: " << std::chrono::duration_cast<std::chrono::microseconds>(c-b).count() << " micros" << std::endl;
+	std::cout << "Serializing input from cache took: " << std::chrono::duration_cast<std::chrono::microseconds>(b-a).count() << " micros" << std::endl;
 }
 
 void TaskScheduler::ExecuteUDFOnParallelWorkers(DataChunk &chunk, idx_t function_index, Vector &result) {

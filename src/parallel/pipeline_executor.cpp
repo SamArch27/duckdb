@@ -405,7 +405,7 @@ PipelineExecuteResult PipelineExecutor::PushFinalize() {
 	auto &scalar_funcs = db.scalar_funcs;
 	auto &udf_strategies = db.udf_strategies;
 	auto &udf_caches = db.udf_caches;
-	auto &udf_inputs = db.udf_string_inputs;
+	auto &udf_inputs = db.udf_inputs;
 
 	auto &scheduler = TaskScheduler::GetScheduler(const_cast<DatabaseInstance &>(db));
 

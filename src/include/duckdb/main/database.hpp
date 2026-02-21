@@ -65,8 +65,8 @@ public:
 	vector<UDFStrategy> udf_strategies;
 	vector<unique_ptr<GroupedAggregateHashTable>> udf_caches;
 	vector<unique_ptr<mutex>> udf_locks;
-	vector<unique_ptr<ska::flat_hash_map<string_t, int64_t>>> udf_string_caches;
-	vector<unique_ptr<ska::flat_hash_set<string_t>>> udf_string_inputs;
+	vector<unique_ptr<vector<string>>> udf_inputs;
+	vector<unique_ptr<vector<string>>> udf_outputs;
 
 public:
 	BufferPool &GetBufferPool() const;

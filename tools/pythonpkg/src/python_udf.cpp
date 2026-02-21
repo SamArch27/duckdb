@@ -377,8 +377,8 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	auto &func_return_types = db.func_return_types;
 	auto &udf_caches = db.udf_caches;
 	auto &udf_locks = db.udf_locks;
-	auto &udf_string_caches = db.udf_string_caches;
-	auto &udf_string_inputs = db.udf_string_inputs;
+	auto &udf_inputs = db.udf_inputs;
+	auto &udf_outputs = db.udf_outputs;
 
 	idx_t function_index = inner_funcs.size();
 
@@ -395,226 +395,38 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 		// lookup UDF caching flag
 		bool udf_caching = db_config.options.udf_caching;
 		if (udf_caching) {
-			if (input.GetTypes()[0] == LogicalType::VARCHAR && return_type == LogicalType::BIGINT) {
-				auto &udf_cache = db.udf_string_caches[function_index];
-				auto &udf_inputs = db.udf_string_inputs[function_index];
-				if (!udf_cache) {
-					udf_cache = make_uniq<ska::flat_hash_map<string_t, int64_t>>();
-					udf_inputs = make_uniq<ska::flat_hash_set<string_t>>();
+			if (input.GetTypes()[0] == LogicalType::VARCHAR && return_type == LogicalType::VARCHAR && udf_strategy == UDFStrategy::MATERIALIZE) {
+				auto &udf_inputs = db.udf_inputs[function_index];
+				auto &udf_outputs = db.udf_outputs[function_index];
+				auto &udf_cache = db.udf_caches[function_index];
+				auto &udf_lock = db.udf_locks[function_index];
+				
+				lock_guard<mutex> cache_lock(*udf_lock);
+				if (!udf_inputs) {
+					udf_inputs = make_uniq<vector<string>>();
+					udf_outputs = make_uniq<vector<string>>();
 				}
-				auto &global_cache = *udf_cache;
-				auto &global_inputs = *udf_inputs;
+				auto& global_inputs = udf_inputs;
 				auto &input_vec = input.data[0];
-				auto result_data = FlatVector::GetData<int64_t>(result);
+				input_vec.Flatten(input.size());
+				auto input_data = FlatVector::GetData<string_t>(input_vec);
 
-				if (input_vec.GetVectorType() == VectorType::DICTIONARY_VECTOR) {
-					auto &dict = DictionaryVector::Child(input_vec);
-					auto dict_data = FlatVector::GetData<string_t>(dict);
-					auto &sel = DictionaryVector::SelVector(input_vec);
-					auto *sel_data = sel.data();
-
-					// if we are materializing then skip the actual UDF call
-					if (udf_strategy == UDFStrategy::MATERIALIZE) {
-						// directly set the output to NOT NULL and return
-						for (idx_t i = 0; i < input.size(); ++i) {
-							FlatVector::SetNull(result, i, false);
-							if (!FlatVector::IsNull(dict, sel_data[i])) {
-								global_inputs.insert(dict_data[sel_data[i]]);
-							}
-						}
-						return;
-					}
-
-					// misses selection vector
-					SelectionVector misses;
-					misses.Initialize();
-
-					// map of code to the first index
-					auto code_to_first_index = ska::flat_hash_map<sel_t, idx_t>();
-					code_to_first_index.reserve(input.size());
-					idx_t miss_count = 0;
-					for (idx_t i = 0; i < input.size(); ++i) {
-						// get the code
-						sel_t code = sel_data[i];
-						// find its first index
-						auto it = code_to_first_index.find(code);
-						if (it == code_to_first_index.end()) {
-							// save the first index
-							code_to_first_index.emplace(code, i);
-							// handle NULL
-							if (FlatVector::IsNull(dict, code)) {
-								misses.set_index(miss_count++, i);
-								continue;
-							}
-							// now check if its a miss
-							auto key_it = global_cache.find(dict_data[code]);
-							// if its a miss then add it to the selection vector
-							if (key_it == global_cache.end()) {
-								misses.set_index(miss_count++, i);
-							} else {
-								// otherwise write out the cached result
-								result_data[i] = key_it->second;
-							}
-						}
-					}
-
-					// create a input vector sliced to the misses
-					DataChunk sliced_input;
-					sliced_input.InitializeEmpty(input.GetTypes());
-					sliced_input.Reference(input);
-					sliced_input.Slice(misses, miss_count);
-
-					// create a result vector sliced to the misses
-					Vector sliced_result(result.GetType());
-					sliced_result.Flatten(miss_count);
-
-					// invoke the UDF on the misses
-					if (miss_count != 0) {	
-					    inner_func(sliced_input, sliced_result);
-					}
-
-					// get the data from the result
-					auto sliced_result_data = FlatVector::GetData<int64_t>(sliced_result);
-
-					// write each miss out
-					for (idx_t i = 0; i < miss_count; ++i) {
-						auto target = misses[i];
-
-						// copy nulls
-						if (FlatVector::IsNull(sliced_result, i)) {
-							FlatVector::SetNull(result, target, true);
-							continue;
-						}
-
-						// copy result
-						auto value = sliced_result_data[i];
-						result_data[target] = value;
-						FlatVector::SetNull(result, target, false);
-
-						// add the result to the UDF cache
-						global_cache.emplace(dict_data[sel_data[target]], value);
-					}
-
-					// broadcast the results using first_idx
-					for (idx_t i = 0; i < input.size(); ++i) {
-						// first get the code
-						sel_t code = sel_data[i];
-						// then get the first index with that code
-						idx_t first_index = code_to_first_index.at(code);
-						// skip if this is the first index
-						if (i == first_index) {
-							continue;
-						}
-						// otherwise copy the result over to this index
-						result_data[i] = result_data[first_index];
-						// and copy the null value (true or false)
-						FlatVector::SetNull(result, i, FlatVector::IsNull(result, first_index));
-					}
-
-				} else {
-
-					input_vec.Flatten(input.size());
-					auto input_data = FlatVector::GetData<string_t>(input_vec);
-
-					// if we are materializing then skip the actual UDF call
-					if (udf_strategy == UDFStrategy::MATERIALIZE) {
-						// directly set the output to NOT NULL and return
-						for (idx_t i = 0; i < input.size(); ++i) {
-							FlatVector::SetNull(result, i, false);
-							if (!FlatVector::IsNull(input_vec, i)) {
-								global_inputs.insert(input_data[i]);
-							}
-						}
-						return;
-					}
-
-					// misses selection vector
-					SelectionVector misses;
-					misses.Initialize();
-
-					// map of index to the first index
-					auto key_to_first_index = ska::flat_hash_map<string_t, idx_t>();
-					key_to_first_index.reserve(input.size());
-					idx_t miss_count = 0;
-					for (idx_t i = 0; i < input.size(); ++i) {
-						// get the key
-						auto &val = input_data[i];
-						// find its first index
-						auto it = key_to_first_index.find(val);
-						// if this key does not have a first index
-						if (it == key_to_first_index.end()) {
-							// save the first index
-							key_to_first_index.emplace(val, i);
-							// handle NULL
-							if (FlatVector::IsNull(input_vec, i)) {
-								misses.set_index(miss_count++, i);
-								continue;
-							}
-							// now check if its a miss
-							auto key_it = global_cache.find(val);
-							// if its a miss then add it to the selection vector
-							if (key_it == global_cache.end()) {
-								misses.set_index(miss_count++, i);
-							} else {
-								// otherwise write out the cached result
-								result_data[i] = key_it->second;
-							}
-						}
-					}
-
-					// create a input vector sliced to the misses
-					DataChunk sliced_input;
-					sliced_input.InitializeEmpty(input.GetTypes());
-					sliced_input.Reference(input);
-					sliced_input.Slice(misses, miss_count);
-
-					// create a result vector sliced to the misses
-					Vector sliced_result(result.GetType());
-					sliced_result.Flatten(miss_count);
-
-					// invoke the UDF on the misses
-					inner_func(sliced_input, sliced_result);
-
-					// get the data from the result
-					auto sliced_result_data = FlatVector::GetData<int64_t>(sliced_result);
-
-					// write each miss out
-					for (idx_t i = 0; i < miss_count; ++i) {
-						auto target = misses[i];
-
-						// copy nulls
-						if (FlatVector::IsNull(sliced_result, i)) {
-							FlatVector::SetNull(result, target, true);
-							continue;
-						}
-
-						// copy result
-						auto value = sliced_result_data[i];
-						result_data[target] = value;
-						FlatVector::SetNull(result, target, false);
-
-						// add the result to the UDF cache
-						global_cache.emplace(input_data[target], value);
-					}
-
-					// broadcast the results using first_idx
-					for (idx_t i = 0; i < input.size(); ++i) {
-						// first get the key
-						auto &key = input_data[i];
-						// then get the first index with that code
-						idx_t first_index = key_to_first_index.at(key);
-						// skip if this is the first index
-						if (i == first_index) {
-							continue;
-						}
-						// otherwise copy the result over to this index
-						result_data[i] = result_data[first_index];
-						// and copy the null value (true or false)
-						FlatVector::SetNull(result, i, FlatVector::IsNull(result, first_index));
+				// directly set the output to NOT NULL, save the inputs and return
+				for (idx_t i = 0; i < input.size(); ++i) {
+					FlatVector::SetNull(result, i, false);
+					if (!FlatVector::IsNull(input_vec, i)) {
+						global_inputs->push_back(input_data[i].GetString());
 					}
 				}
-			} else {
-
+				return;
+			
+			} /*else if (input.GetTypes()[0] == LogicalType::VARCHAR && return_type == LogicalType::VARCHAR && udf_strategy == UDFStrategy::LOOKUP) {
+		                // TODO: Perfect Hashing???
+				for (idx_t i = 0; i < input.size(); ++i) {
+					FlatVector::SetNull(result, i, false);	
+				}
+		      	} */
+			else {
 				// create a new data chunk to reference this one
 				DataChunk sliced_input;
 				auto input_types = input.GetTypes();
@@ -728,8 +540,8 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	udf_strategies.push_back(UDFStrategy::UNDECIDED);
 	udf_caches.push_back(nullptr);
 	udf_locks.push_back(make_uniq<mutex>());
-	udf_string_caches.push_back(nullptr);
-	udf_string_inputs.push_back(nullptr);
+	udf_inputs.push_back(nullptr);
+	udf_outputs.push_back(nullptr);
 	return func;
 }
 
