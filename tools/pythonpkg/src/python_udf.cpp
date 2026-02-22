@@ -405,6 +405,11 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 				if (!udf_inputs) {
 					udf_inputs = make_uniq<vector<string>>();
 					udf_outputs = make_uniq<vector<string>>();
+					// create it if it hasn't been created yet
+					if (udf_cache == nullptr) {
+						udf_cache = MakeCache(input, state, result);
+					}
+
 				}
 				auto& global_inputs = udf_inputs;
 				auto &input_vec = input.data[0];
@@ -441,7 +446,6 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 				// check if the UDF cache has been created
 				auto &udf_cache = db.udf_caches[function_index];
 				auto &udf_lock = db.udf_locks[function_index];
-
 				{
 					lock_guard<mutex> cache_lock(*udf_lock);
 					{

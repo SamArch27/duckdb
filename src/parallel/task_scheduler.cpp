@@ -764,10 +764,7 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 	if (!string_inputs) {
 		// clear the HT so we can now fill it with the actual results
 		cache->Abandon();
-	} else {
-		// TODO: Add to cache
-	}
-
+	} 
 
 	auto e = std::chrono::high_resolution_clock::now();
 
@@ -781,6 +778,7 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 		idx_t old_pos = input_stream.GetPosition();
 		idx_t length = DeserializeDataChunk(input_stream, input);
 		input_stream.SetPosition(old_pos + length);
+		result.SetCardinality(input.size());
 
 		// combine the partial results from each process
 		for (idx_t i = 0; i < num_procs; ++i) {
@@ -803,6 +801,7 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 
 		
 		// TODO: Perfect hashing???
+		/*
 		if (string_inputs) {
 			auto input_data = FlatVector::GetData<string_t>(input.data[0]);
 			auto result_data = FlatVector::GetData<string_t>(result.data[0]);
@@ -816,9 +815,10 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 				string_outputs->emplace_back(result_data[i].GetString());
 			}
 		} else {
+		*/
 			// Add the new chunk (with the result this time!) into the cache
 			cache->AddChunk(input, result, AggregateType::NON_DISTINCT);
-		}
+		//}
 	}
 
 	// reset the futex for each worker
