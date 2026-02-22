@@ -379,6 +379,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	auto &udf_locks = db.udf_locks;
 	auto &udf_inputs = db.udf_inputs;
 	auto &udf_outputs = db.udf_outputs;
+	auto &udf_hash_tables = db.udf_hash_tables;
 
 	idx_t function_index = inner_funcs.size();
 
@@ -398,6 +399,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 			if (input.GetTypes()[0] == LogicalType::VARCHAR && return_type == LogicalType::VARCHAR && udf_strategy == UDFStrategy::MATERIALIZE) {
 				auto &udf_inputs = db.udf_inputs[function_index];
 				auto &udf_outputs = db.udf_outputs[function_index];
+				auto &udf_hash_table = db.udf_hash_tables[function_index];
 				auto &udf_cache = db.udf_caches[function_index];
 				auto &udf_lock = db.udf_locks[function_index];
 				
@@ -405,6 +407,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 				if (!udf_inputs) {
 					udf_inputs = make_uniq<vector<string>>();
 					udf_outputs = make_uniq<vector<string>>();
+					udf_hash_table = make_uniq<ska::flat_hash_map<string_t, string_t>>();
 					// create it if it hasn't been created yet
 					if (udf_cache == nullptr) {
 						udf_cache = MakeCache(input, state, result);
@@ -425,12 +428,26 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 				}
 				return;
 			
-			} /*else if (input.GetTypes()[0] == LogicalType::VARCHAR && return_type == LogicalType::VARCHAR && udf_strategy == UDFStrategy::LOOKUP) {
-		                // TODO: Perfect Hashing???
+			} else if (input.GetTypes()[0] == LogicalType::VARCHAR && return_type == LogicalType::VARCHAR && udf_strategy == UDFStrategy::LOOKUP) {
+				auto &udf_hash_table = db.udf_hash_tables[function_index];	                
+
+				// lookup the input string and copy out the output string
+				auto &input_vec = input.data[0];
+				input_vec.Flatten(input.size());
+				auto input_data = FlatVector::GetData<string_t>(input_vec);
+				result.Flatten(input.size());
+				auto result_data = FlatVector::GetData<string_t>(result);
+
+				// lookup in hash table and return the result directly
 				for (idx_t i = 0; i < input.size(); ++i) {
-					FlatVector::SetNull(result, i, false);	
+					if (FlatVector::IsNull(input_vec, i)) {
+					    FlatVector::SetNull(result, i, true);
+					} else {
+						FlatVector::SetNull(result, i , false);
+						result_data[i] = udf_hash_table->at(input_data[i]);
+					}
 				}
-		      	} */
+			} 
 			else {
 				// create a new data chunk to reference this one
 				DataChunk sliced_input;
@@ -546,6 +563,7 @@ static scalar_function_t CreateNativeFunction(PyObject *function, PythonExceptio
 	udf_locks.push_back(make_uniq<mutex>());
 	udf_inputs.push_back(nullptr);
 	udf_outputs.push_back(nullptr);
+	udf_hash_tables.push_back(nullptr);
 	return func;
 }
 

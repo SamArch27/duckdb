@@ -68,6 +68,8 @@ public:
 	vector<unique_ptr<vector<string>>> udf_inputs;
 	vector<unique_ptr<vector<string>>> udf_outputs;
 
+	vector<unique_ptr<ska::flat_hash_map<string_t, string_t>>> udf_hash_tables;
+
 public:
 	BufferPool &GetBufferPool() const;
 	DUCKDB_API SecretManager &GetSecretManager();

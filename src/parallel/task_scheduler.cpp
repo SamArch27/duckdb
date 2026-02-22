@@ -693,7 +693,15 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 	auto &cache = db.udf_caches[function_index];
 	auto &string_inputs = db.udf_inputs[function_index];
 	auto &string_outputs = db.udf_outputs[function_index];
+
 	if (string_inputs) {
+		string_outputs->resize(string_inputs->size());
+	}
+
+	auto &udf_hash_table = db.udf_hash_tables[function_index];
+	if (string_inputs) {
+		udf_hash_table->reserve(string_inputs->size());
+
 		idx_t i = 0;
 		auto distinct_data = FlatVector::GetData<string_t>(distinct_rows.data[0]);
 		for (const auto& input : *string_inputs) {
@@ -790,35 +798,35 @@ void TaskScheduler::BatchExecuteUDFOnParallelWorkers(idx_t function_index) {
 			DataChunk output;
 			idx_t length = DeserializeDataChunk(output_stream, output);
 			output_stream.SetPosition(old_pos + length);
+			auto output_data = FlatVector::GetData<string_t>(output.data[0]);
 
 			// compute range for that process
 		        idx_t start_row = i * input.size() / num_procs;
 			idx_t sliced_count = output.size(); 
 
-			// now copy the partial result from this process into the final result
-			VectorOperations::Copy(output.data[0], result.data[0], sliced_count, 0, start_row);
+			if (string_inputs) {
+				for (idx_t j = 0; j < sliced_count; ++j) {
+				     // copy the string output
+				     (*string_outputs)[2048*chunk_idx + start_row + j] = output_data[j].GetString();
+				}
+			} else {	
+				// now copy the partial result from this process into the final result
+				VectorOperations::Copy(output.data[0], result.data[0], sliced_count, 0, start_row);
+			}
 		}
 
 		
 		// TODO: Perfect hashing???
-		/*
-		if (string_inputs) {
-			auto input_data = FlatVector::GetData<string_t>(input.data[0]);
-			auto result_data = FlatVector::GetData<string_t>(result.data[0]);
-			
-			for (idx_t i = 0; i < input.size(); ++i) {
- 				// skip nulls
-				if (FlatVector::IsNull(result.data[0], i)) {
-					continue;
-				}
-				// save outputs directly
-				string_outputs->emplace_back(result_data[i].GetString());
-			}
-		} else {
-		*/
+		if (!string_inputs) {
 			// Add the new chunk (with the result this time!) into the cache
 			cache->AddChunk(input, result, AggregateType::NON_DISTINCT);
-		//}
+		}
+	}
+
+	if (string_inputs) {
+		for (idx_t i = 0; i < string_inputs->size(); ++i) {
+			udf_hash_table->emplace((*string_inputs)[i], (*string_outputs)[i]);
+		}
 	}
 
 	// reset the futex for each worker
